@@ -69,6 +69,7 @@ flowchart TD
 
     I --> J[simulate_many_years]
     J --> K[Final Simulated Dataset]
+```
 
 ```md
 ## Methods and modeling assumptions
