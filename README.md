@@ -18,3 +18,36 @@ Run simulation:
 ```bash
 python -m src.simulation.run_simulation
 ```
+
+## Repository structure
+
+```text
+.
+├── README.md
+├── .gitignore
+├── requirements.txt
+├── src/
+│   ├── ingestion/
+│   │   ├── __init__.py
+│   │   ├── download_census.py
+│   │   └── download_all_census.py
+│   ├── features/
+│   │   ├── __init__.py
+│   │   └── build_city_zip_map.py
+│   └── simulation/
+│       ├── __init__.py
+│       ├── finaid_sim.py
+│       └── run_simulation.py
+└── data/
+    ├── raw/
+    │   ├── census/
+    │   │   └── tiger/
+    │   │       └── 2023/
+    │   │           ├── place/
+    │   │           │   └── README.md
+    │   │           └── zcta520/
+    │   │               └── README.md
+    │   └── acs/
+    └── processed/
+        ├── geo/
+        └── sim/
