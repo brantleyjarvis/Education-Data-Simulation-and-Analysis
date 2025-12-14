@@ -1,8 +1,10 @@
-# Education-Data-Simulation-and-Analysis 
+# Education-Data-Simulation-and-Analysis
 
-This repository houses a data science demonstration project using simulated data in the K–12 private education sector. 
+This repository houses a data science demonstration project using simulated data
+in the K–12 private education sector.
 
-## Data setup 
+## Data setup
+
 Download required Census / TIGER shapefiles:
 
 ```bash
@@ -10,11 +12,13 @@ python -m src.ingestion.download_all_census
 ```
 
 Generate city-zip mappings via spatial join:
+
 ```bash
 python -m src.features.build_city_zip_map
 ```
 
 Run simulation:
+
 ```bash
 python -m src.simulation.run_simulation
 ```
@@ -51,27 +55,24 @@ python -m src.simulation.run_simulation
     └── processed/
         ├── geo/
         └── sim/
+```
 
 ## Pipeline overview
 
 ```mermaid
 flowchart TD
-    A[Census TIGER / ACS Data] --> B[download_all_census.py]
-    B --> C[Raw Geospatial Files]
-    C --> D[build_city_zip_map.py]
-    D --> E[city_zip_map.csv / geojson]
+  A[Download TIGER shapefiles] --> B[Raw TIGER files<br/>data/raw/census/tiger/2023]
+  B --> C[Spatial join<br/>build_city_zip_map.py]
+  C --> D[city_zip_map.csv<br/>city_zip_map.geojson]
 
-    E --> F[build_zip_df]
-    F --> G[ZIP-level SES + Weights]
+  E[ACS CSVs<br/>data/raw/acs] --> F[ZIP-level features<br/>SES + weights]
+  D --> F
 
-    G --> H[simulate_applicants]
-    H --> I[Admissions & Aid Model]
-
-    I --> J[simulate_many_years]
-    J --> K[Final Simulated Dataset]
+  F --> G[Applicant simulation<br/>finaid_sim.py]
+  G --> H[Runner<br/>run_simulation.py]
+  H --> I[Output dataset<br/>data/processed/sim/finaid_sim.csv]
 ```
 
-```md
 ## Methods and modeling assumptions
 
 This project uses a generative simulation framework to approximate applicant
