@@ -1,0 +1,15 @@
+# Ignore all data outputs
+data/raw/**
+data/interim/**
+data/processed/**
+
+# But keep README files for provenance
+!data/**/README.md
+
+# Python junk
+__pycache__/
+*.pyc
+
+# OS junk
+.DS_Store
+Thumbs.db
