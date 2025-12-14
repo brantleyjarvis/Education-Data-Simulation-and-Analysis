@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import argparse
 import sys
+import time
 import zipfile
 from pathlib import Path
 from urllib.parse import urlparse
@@ -32,9 +33,16 @@ def download_file(
     out_dir: Path,
     filename: str | None = None,
     overwrite: bool = False,
-    timeout: int = 60,
+    timeout: int = 300,  # read timeout (seconds)
 ) -> Path:
+    """
+    Download a file with retries and safe streaming.
+
+    timeout applies to READ timeout.
+    Connect timeout is fixed at 10s.
+    """
     out_dir.mkdir(parents=True, exist_ok=True)
+
     if filename is None:
         filename = _filename_from_url(url)
 
@@ -47,22 +55,43 @@ def download_file(
     print(f"[download] {url}")
     print(f"          -> {out_path}")
 
-    with requests.get(url, stream=True, timeout=timeout) as r:
-        r.raise_for_status()
+    attempts = 5
+    backoff_seconds = 5
+    last_err: Exception | None = None
 
-        tmp_path = out_path.with_suffix(out_path.suffix + ".part")
-        with tmp_path.open("wb") as f:
-            for chunk in r.iter_content(chunk_size=1024 * 1024):
-                if chunk:
-                    f.write(chunk)
+    for attempt in range(1, attempts + 1):
+        try:
+            req_timeout = (10, timeout)  # (connect, read)
 
-        tmp_path.replace(out_path)
+            with requests.get(url, stream=True, timeout=req_timeout) as r:
+                r.raise_for_status()
 
-    print(f"[done] downloaded: {out_path}")
-    return out_path
+                tmp_path = out_path.with_suffix(out_path.suffix + ".part")
+                with tmp_path.open("wb") as f:
+                    for chunk in r.iter_content(chunk_size=1024 * 1024):
+                        if chunk:
+                            f.write(chunk)
+
+                tmp_path.replace(out_path)
+
+            print(f"[done] downloaded: {out_path}")
+            return out_path
+
+        except Exception as e:
+            last_err = e
+            print(f"[warn] download failed (attempt {attempt}/{attempts}): {e}")
+            if attempt < attempts:
+                time.sleep(backoff_seconds * attempt)
+
+    raise RuntimeError(
+        f"Failed to download after {attempts} attempts: {url}"
+    ) from last_err
 
 
 def unzip_file(zip_path: Path, out_dir: Path, overwrite: bool = False) -> Path:
+    """
+    Unzip a ZIP file into a subdirectory named after the ZIP stem.
+    """
     if not zip_path.exists():
         raise FileNotFoundError(zip_path)
 
@@ -70,6 +99,7 @@ def unzip_file(zip_path: Path, out_dir: Path, overwrite: bool = False) -> Path:
     unzip_dir.mkdir(parents=True, exist_ok=True)
 
     print(f"[unzip] {zip_path} -> {unzip_dir}")
+
     with zipfile.ZipFile(zip_path, "r") as z:
         for member in z.namelist():
             target = unzip_dir / member
@@ -92,6 +122,7 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         out_dir = Path(args.out).expanduser().resolve()
+
         zip_path = download_file(
             url=args.url,
             out_dir=out_dir,
