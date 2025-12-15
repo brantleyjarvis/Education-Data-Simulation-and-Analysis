@@ -232,6 +232,18 @@ def simulate_applicants(
     df.loc[awarded.index, "aid_offered_pct_tuition"] = pct
     df.loc[awarded.index, "aid_offered_amount"] = pct * awarded["tuition"]
 
+    # ---- Aid budget calibration ----
+    TARGET_TOTAL_AID = 3_200_000  # adjust as needed
+
+    current_total = df["aid_offered_amount"].sum()
+
+    if current_total > 0:
+        scale = TARGET_TOTAL_AID / current_total
+        df["aid_offered_amount"] *= scale
+        df["aid_offered_pct_tuition"] = (
+            df["aid_offered_amount"] / df["tuition"]
+        ).clip(0, 1)
+    
     # 15. Enrollment decision
     df["enrolled"] = 0
     mask = df["spot_offered"] == 1
