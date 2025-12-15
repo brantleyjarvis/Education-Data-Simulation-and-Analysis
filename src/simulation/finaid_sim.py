@@ -206,7 +206,7 @@ def simulate_applicants(
         ).head(seats).index
         df.loc[idx, "spot_offered"] = 1
 
-    # 14. Aid offered (updated to match NA 2025-26 distribution chart)
+    # 14. Aid offered (updated to match recent distribution chart)
     df["aid_offered_pct_tuition"] = 0.0
     df["aid_offered_amount"] = 0.0
 
@@ -239,10 +239,10 @@ def simulate_applicants(
     eligible["school_income_bin"] = eligible["income_band"].astype(str).map(map_to_school_income_bin)
 
     # --- one child vs. more than one child in tuition-required school ---
-    # Using your variable tuition_enrolled_children as the proxy:
+    # Using variable tuition_enrolled_children as the proxy:
     eligible["multi_child"] = (eligible["tuition_enrolled_children"] >= 2)
 
-    # --- Distribution params from NA chart (amounts in $) ---
+    # --- Distribution params from chart (amounts in $) ---
     # One child :contentReference[oaicite:3]{index=3}
     ONE = {
         "<=50":   dict(p_award=29/29, mean=22474, low=10000, high=26500),
