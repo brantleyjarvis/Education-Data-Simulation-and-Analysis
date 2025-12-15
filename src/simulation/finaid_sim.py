@@ -325,7 +325,10 @@ def simulate_applicants(
     # 16. FINAL financial aid (schoolwide target: ~18% of ENROLLEES)
     AID_RATE = 0.18
 
-    enrolled_idx = df.index[df["enrolled"] == 1].to_numpy()
+    enrolled_idx = df.index[
+    (df["enrolled"] == 1) &
+    (df["aid_offer_amount"] > 0)
+    ]
     n_enrolled = len(enrolled_idx)
     n_aid = int(round(AID_RATE * n_enrolled))
 
