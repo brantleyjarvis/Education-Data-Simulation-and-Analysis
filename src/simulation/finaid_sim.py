@@ -11,13 +11,6 @@ def simulate_applicants(
 ) -> pd.DataFrame:
     """
     Simulate n_applicants using the private school generative model.
-
-    Expected columns in zip_df:
-      - sampling_weight
-      - zip_code, city
-      - zip_income_median, zip_home_value_median
-      - zip_pct_bachelors_plus, zip_pct_children
-      - ses_index
     """
     if rng is None:
         rng = np.random.default_rng()
@@ -60,6 +53,7 @@ def simulate_applicants(
     ]
     df = pd.concat([df, chosen_zips[cols_to_add]], axis=1)
     df["ses_index"] = df["ses_index"].fillna(df["ses_index"].mean())
+    df["ses_centered"] = df["ses_index"] - df["ses_index"].mean()
 
     # 5. Race / Ethnicity
     def baseline_minority_prob(g: int) -> float:
@@ -70,16 +64,13 @@ def simulate_applicants(
         else:
             return 0.24
 
-    baseline_probs = df["grade_applying_to"].apply(baseline_minority_prob)
-    ses_centered = df["ses_index"] - df["ses_index"].mean()
-    df["ses_centered"] = ses_centered
-
-    logit = np.log(baseline_probs / (1 - baseline_probs)) - 0.10 * ses_centered
+    base_minority = df["grade_applying_to"].apply(baseline_minority_prob)
+    logit = np.log(base_minority / (1 - base_minority)) - 0.10 * df["ses_centered"]
     minority_prob = 1 / (1 + np.exp(-logit))
     df["race_ethnic_minority"] = rng.binomial(1, minority_prob)
 
     # 6. Gender
-    df["gender_male"] = rng.binomial(1, 0.5, size=len(df))
+    df["gender_male"] = rng.binomial(1, 0.5, size=n_applicants)
 
     # 7. Income band
     ses_pct = df["ses_index"].rank(pct=True)
@@ -99,7 +90,7 @@ def simulate_applicants(
     # 8. Family size
     df["family_size"] = rng.choice(
         [2, 3, 4, 5, 6],
-        size=len(df),
+        size=n_applicants,
         p=[0.05, 0.25, 0.45, 0.20, 0.05]
     )
 
@@ -108,7 +99,6 @@ def simulate_applicants(
     logit = np.log(np.clip(base_prob, 1e-6, 1 - 1e-6) / (1 - base_prob))
     logit += 0.05 * (ses_pct - 0.5)
     sib_prob = 1 / (1 + np.exp(-logit))
-
     df["tuition_enrolled_children"] = rng.binomial(1, sib_prob)
     df.loc[df["family_size"] == 2, "tuition_enrolled_children"] = 0
 
@@ -133,30 +123,21 @@ def simulate_applicants(
     logit += df["grade_applying_to"].apply(grade_legacy_effect)
     logit += 0.12 * df["ses_centered"]
     logit += 0.6 * df["tuition_enrolled_children"]
-
-    legacy_prob = 1 / (1 + np.exp(-logit))
-    df["legacy_status"] = rng.binomial(1, legacy_prob)
+    df["legacy_status"] = rng.binomial(1, 1 / (1 + np.exp(-logit)))
 
     # 11. Aid requested
     base_p = df["income_band"].map({
-    "<75k": 0.95,      # was 0.98
-    "75–150k": 0.85,   # was 0.95
-    "150–250k": 0.20,  # was 0.30
-    ">250k": 0.03      # was 0.05
+        "<75k": 0.95,
+        "75–150k": 0.85,
+        "150–250k": 0.20,
+        ">250k": 0.03
     })
 
     logit = np.log(base_p / (1 - base_p))
     logit += 0.05 * (df["family_size"] - 3)
-
-    # soften the "already paying tuition" push a bit
-    logit += 0.05 * df["tuition_enrolled_children"]   # was 0.10
-
-    # stronger SES deterrent
-    logit -= 0.10 * df["ses_centered"]                # was 0.05
-
-    aid_prob = 1 / (1 + np.exp(-logit))
-    df["aid_requested"] = rng.binomial(1, aid_prob)
-
+    logit += 0.05 * df["tuition_enrolled_children"]
+    logit -= 0.10 * df["ses_centered"]
+    df["aid_requested"] = rng.binomial(1, 1 / (1 + np.exp(-logit)))
 
     # 12. Scores
     n = len(df)
@@ -169,27 +150,22 @@ def simulate_applicants(
         [0.5, 0.4, 0.3, 0.5, 1.0],
     ])
 
-    L = np.linalg.cholesky(corr)
-    latent = rng.normal(size=(n, 5)) @ L.T
+    latent = rng.normal(size=(n, 5)) @ np.linalg.cholesky(corr).T
+    z_test, z_art, z_ath, z_lead, z_int = latent.T
 
-    z_testing, z_art, z_ath, z_lead, z_interview = latent.T
+    z_test += 0.20 * df["ses_centered"] - 0.20 * df["race_ethnic_minority"]
+    z_art += 0.10 * df["ses_centered"] - 0.05 * df["race_ethnic_minority"]
+    z_ath += 0.10 * df["ses_centered"] - 0.05 * df["race_ethnic_minority"]
+    z_lead += 0.10 * df["ses_centered"] - 0.05 * df["race_ethnic_minority"]
+    z_int += 0.10 * df["ses_centered"] - 0.05 * df["race_ethnic_minority"]
 
-    ses = df["ses_centered"].to_numpy()
-    minority = df["race_ethnic_minority"].to_numpy()
+    pct = pd.Series(z_test).rank(pct=True)
+    df["score_testing"] = (pct ** 0.4 * 100).clip(0, 99)
 
-    z_testing += 0.20 * ses - 0.20 * minority
-    z_art += 0.10 * ses - 0.05 * minority
-    z_ath += 0.10 * ses - 0.05 * minority
-    z_lead += 0.10 * ses - 0.05 * minority
-    z_interview += 0.10 * ses - 0.05 * minority
-
-    rank_pct = pd.Series(z_testing).rank(pct=True)
-    df["score_testing"] = (rank_pct ** 0.4 * 100).clip(0, 99)
-
-    def likert(z: np.ndarray, cuts: tuple[float, float, float, float]) -> np.ndarray:
-        pct = pd.Series(z).rank(pct=True)
+    def likert(z, cuts):
+        p = pd.Series(z).rank(pct=True)
         return np.select(
-            [pct <= cuts[0], pct <= cuts[1], pct <= cuts[2], pct <= cuts[3]],
+            [p <= cuts[0], p <= cuts[1], p <= cuts[2], p <= cuts[3]],
             [1, 2, 3, 4],
             default=5
         )
@@ -197,9 +173,9 @@ def simulate_applicants(
     df["score_art"] = likert(z_art + rng.normal(0, 0.35, n), (0.12, 0.32, 0.58, 0.82))
     df["score_athletics"] = likert(z_ath + rng.normal(0, 0.35, n), (0.08, 0.28, 0.55, 0.80))
     df["score_leadership"] = likert(z_lead + rng.normal(0, 0.35, n), (0.10, 0.30, 0.55, 0.78))
-    df["score_interview"] = likert(z_interview + rng.normal(0, 0.35, n), (0.06, 0.25, 0.50, 0.75))
+    df["score_interview"] = likert(z_int + rng.normal(0, 0.35, n), (0.06, 0.25, 0.50, 0.75))
 
-    # 13. spot_offered (admissions)
+    # 13. Spot offered
     seat_quota = {
         1: 40, 2: 15, 3: 15, 4: 12, 5: 12,
         6: 30, 7: 8, 8: 8, 9: 20,
@@ -210,42 +186,33 @@ def simulate_applicants(
 
     z_test = (df["score_testing"] - df["score_testing"].mean()) / df["score_testing"].std()
     z_int = (df["score_interview"] - df["score_interview"].mean()) / df["score_interview"].std()
-    z_lead_score = (df["score_leadership"] - df["score_leadership"].mean()) / df["score_leadership"].std()
+    z_lead = (df["score_leadership"] - df["score_leadership"].mean()) / df["score_leadership"].std()
 
     income_bonus = df["income_band"].map({
         "<75k": 0.6, "75–150k": 0.3, "150–250k": 0.1, ">250k": 0.0
     })
 
-    admit_index = (
+    df["admit_index"] = (
         0.6 * z_test +
         0.3 * z_int +
-        0.3 * z_lead_score +
+        0.3 * z_lead +
         0.6 * df["legacy_status"] +
         income_bonus
     )
 
-    df["admit_index"] = admit_index
-
-    for g, n_seats in seat_quota.items():
-        rows = df[df["grade_applying_to"] == g]
-        if len(rows) == 0:
-            continue
-        admit = rows.sort_values("admit_index", ascending=False).head(n_seats).index
-        df.loc[admit, "spot_offered"] = 1
+    for g, seats in seat_quota.items():
+        idx = df[df["grade_applying_to"] == g].sort_values(
+            "admit_index", ascending=False
+        ).head(seats).index
+        df.loc[idx, "spot_offered"] = 1
 
     # 14. Aid offered
     df["aid_offered_pct_tuition"] = 0.0
     df["aid_offered_amount"] = 0.0
 
-    eligible = (df["spot_offered"] == 1) & (df["aid_requested"] == 1)
-    sub = df.loc[eligible].copy()
-
-    # ~85% of aid applicants receive aid (award gate) ---
-    AID_AWARD_RATE = 0.85
-    sub["aid_awarded"] = rng.binomial(1, AID_AWARD_RATE, size=len(sub)).astype(bool)
-
-    # only compute award amounts for those awarded
-    sub_awarded = sub.loc[sub["aid_awarded"]].copy()
+    eligible = df[(df["spot_offered"] == 1) & (df["aid_requested"] == 1)].copy()
+    eligible["aid_awarded"] = rng.binomial(1, 0.85, size=len(eligible)).astype(bool)
+    awarded = eligible[eligible["aid_awarded"]]
 
     band_mean = {
         "<75k": 0.80, "75–150k": 0.55,
@@ -253,20 +220,17 @@ def simulate_applicants(
     }
 
     pct = (
-    sub_awarded["income_band"].map(band_mean)
-    + 0.04 * (sub_awarded["family_size"] - 4)
-    - 0.03 * sub_awarded["ses_centered"]
-    + 0.03 * sub_awarded["race_ethnic_minority"]
-    + 0.03 * sub_awarded["tuition_enrolled_children"]
-    + rng.normal(0, 0.08, len(sub_awarded))
+        awarded["income_band"].map(band_mean)
+        + 0.04 * (awarded["family_size"] - 4)
+        - 0.03 * awarded["ses_centered"]
+        + 0.03 * awarded["race_ethnic_minority"]
+        + 0.03 * awarded["tuition_enrolled_children"]
+        + rng.normal(0, 0.08, len(awarded))
     ).clip(0, 1)
 
-    # don't count tiny token awards as "receiving aid"
-    MIN_AID_PCT = 0.05
-    pct = np.where(pct < MIN_AID_PCT, 0.0, pct)
-
-    df.loc[sub_awarded.index, "aid_offered_pct_tuition"] = pct
-    df.loc[sub_awarded.index, "aid_offered_amount"] = pct * sub_awarded["tuition"]
+    pct[pct < 0.05] = 0.0
+    df.loc[awarded.index, "aid_offered_pct_tuition"] = pct
+    df.loc[awarded.index, "aid_offered_amount"] = pct * awarded["tuition"]
 
     # 15. Enrollment decision
     df["enrolled"] = 0
@@ -277,7 +241,7 @@ def simulate_applicants(
         "150–250k": 1.6, ">250k": 0.8
     })
 
-    z_test_masked = (df.loc[mask, "score_testing"] - df["score_testing"].mean()) / df["score_testing"].std()
+    z_test_m = (df.loc[mask, "score_testing"] - df["score_testing"].mean()) / df["score_testing"].std()
 
     grade_effect = df.loc[mask, "grade_applying_to"].apply(
         lambda g: 0.0 if g <= 5 else 0.3 if g <= 8 else 0.6
@@ -285,16 +249,14 @@ def simulate_applicants(
 
     logit = (
         1.0
-        + 0.8 * df.loc[mask, "aid_offered_pct_tuition"]
-        + aid_slope * df.loc[mask, "aid_offered_pct_tuition"]
+        + (0.8 + aid_slope) * df.loc[mask, "aid_offered_pct_tuition"]
         + 0.9 * df.loc[mask, "legacy_status"]
         + 0.6 * df.loc[mask, "tuition_enrolled_children"]
-        + 0.25 * z_test_masked
+        + 0.25 * z_test_m
         + grade_effect
     )
 
-    enroll_prob = 1 / (1 + np.exp(-logit))
-    df.loc[mask, "enrolled"] = rng.binomial(1, enroll_prob)
+    df.loc[mask, "enrolled"] = rng.binomial(1, 1 / (1 + np.exp(-logit)))
 
     return df
 
@@ -305,8 +267,7 @@ def simulate_many_years(
     zip_df: pd.DataFrame,
     base_seed: int = 42
 ) -> pd.DataFrame:
-    """Simulate multiple years of applicants by varying RNG seed by year."""
-    all_years: list[pd.DataFrame] = []
+    all_years = []
     for year in range(1, n_years + 1):
         rng_year = np.random.default_rng(base_seed + year)
         df_year = simulate_applicants(applicants_per_year, zip_df, rng_year)
