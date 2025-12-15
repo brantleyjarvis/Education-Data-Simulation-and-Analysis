@@ -300,7 +300,14 @@ def simulate_applicants(
         if highs[i] <= 0:
             offer_amt[i] = 0.0
         else:
-            offer_amt[i] = rtruncnorm(rng, means[i], sds[i], lows[i], highs[i], size=1)[0]
+            offer_amt[i] = rtrunc_lognormal(
+            rng,
+            mean=means[i],
+            low=lows[i],
+            high=highs[i],
+            size=1,
+            sigma=0.65
+        )[0]
 
     tuition = awarded["tuition"].to_numpy(dtype=float)
     offer_amt = np.minimum(offer_amt, tuition)
