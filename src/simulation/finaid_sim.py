@@ -138,20 +138,25 @@ def simulate_applicants(
     df["legacy_status"] = rng.binomial(1, legacy_prob)
 
     # 11. Aid requested
-    base_p = df["income_band"].map({
-        "<75k": 0.98,
-        "75–150k": 0.95,
-        "150–250k": 0.30,
-        ">250k": 0.05
-    })
+base_p = df["income_band"].map({
+    "<75k": 0.95,      # was 0.98
+    "75–150k": 0.85,   # was 0.95
+    "150–250k": 0.20,  # was 0.30
+    ">250k": 0.03      # was 0.05
+})
 
-    logit = np.log(base_p / (1 - base_p))
-    logit += 0.05 * (df["family_size"] - 3)
-    logit += 0.10 * df["tuition_enrolled_children"]
-    logit -= 0.05 * df["ses_centered"]
+logit = np.log(base_p / (1 - base_p))
+logit += 0.05 * (df["family_size"] - 3)
 
-    aid_prob = 1 / (1 + np.exp(-logit))
-    df["aid_requested"] = rng.binomial(1, aid_prob)
+# soften the "already paying tuition" push a bit
+logit += 0.05 * df["tuition_enrolled_children"]   # was 0.10
+
+# stronger SES deterrent
+logit -= 0.10 * df["ses_centered"]                # was 0.05
+
+aid_prob = 1 / (1 + np.exp(-logit))
+df["aid_requested"] = rng.binomial(1, aid_prob)
+
 
     # 12. Scores
     n = len(df)
@@ -229,28 +234,39 @@ def simulate_applicants(
         df.loc[admit, "spot_offered"] = 1
 
     # 14. Aid offered
-    df["aid_offered_pct_tuition"] = 0.0
-    df["aid_offered_amount"] = 0.0
+df["aid_offered_pct_tuition"] = 0.0
+df["aid_offered_amount"] = 0.0
 
-    eligible = (df["spot_offered"] == 1) & (df["aid_requested"] == 1)
-    sub = df.loc[eligible]
+eligible = (df["spot_offered"] == 1) & (df["aid_requested"] == 1)
+sub = df.loc[eligible].copy()
 
-    band_mean = {
-        "<75k": 0.80, "75–150k": 0.55,
-        "150–250k": 0.25, ">250k": 0.05
-    }
+# ~85% of aid applicants receive aid (award gate) ---
+AID_AWARD_RATE = 0.85
+sub["aid_awarded"] = rng.binomial(1, AID_AWARD_RATE, size=len(sub)).astype(bool)
 
-    pct = (
-        sub["income_band"].map(band_mean)
-        + 0.04 * (sub["family_size"] - 4)
-        - 0.03 * sub["ses_centered"]
-        + 0.03 * sub["race_ethnic_minority"]
-        + 0.03 * sub["tuition_enrolled_children"]
-        + rng.normal(0, 0.08, len(sub))
-    ).clip(0, 1)
+# only compute award amounts for those awarded
+sub_awarded = sub.loc[sub["aid_awarded"]].copy()
 
-    df.loc[eligible, "aid_offered_pct_tuition"] = pct
-    df.loc[eligible, "aid_offered_amount"] = pct * sub["tuition"]
+band_mean = {
+    "<75k": 0.80, "75–150k": 0.55,
+    "150–250k": 0.25, ">250k": 0.05
+}
+
+pct = (
+    sub_awarded["income_band"].map(band_mean)
+    + 0.04 * (sub_awarded["family_size"] - 4)
+    - 0.03 * sub_awarded["ses_centered"]
+    + 0.03 * sub_awarded["race_ethnic_minority"]
+    + 0.03 * sub_awarded["tuition_enrolled_children"]
+    + rng.normal(0, 0.08, len(sub_awarded))
+).clip(0, 1)
+
+# don't count tiny token awards as "receiving aid"
+MIN_AID_PCT = 0.05
+pct = np.where(pct < MIN_AID_PCT, 0.0, pct)
+
+df.loc[sub_awarded.index, "aid_offered_pct_tuition"] = pct
+df.loc[sub_awarded.index, "aid_offered_amount"] = pct * sub_awarded["tuition"]
 
     # 15. Enrollment decision
     df["enrolled"] = 0
