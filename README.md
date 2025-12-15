@@ -5,16 +5,29 @@ in the K–12 private education sector.
 
 ## Data setup
 
-Download required Census / TIGER shapefiles:
+Download required TIGER shapefiles:
 
 ```bash
 python -m src.ingestion.download_all_census
+```
+
+Download ACS ZCTA data
+
+```bash
+python -m src.ingestion.download_acs_zcta_detailed
+python -m src.ingestion.download_acs_zcta_profile
 ```
 
 Generate city-zip mappings via spatial join:
 
 ```bash
 python -m src.features.build_city_zip_map
+```
+
+Build zip file
+
+```bash
+python -m src.ingestion.build_zip_df
 ```
 
 Run simulation:
