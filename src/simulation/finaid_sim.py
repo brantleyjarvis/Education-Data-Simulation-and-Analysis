@@ -322,88 +322,42 @@ def simulate_applicants(
 
     df.loc[mask, "enrolled"] = rng.binomial(1, 1 / (1 + np.exp(-logit)))
 
-    # 16. FINAL financial aid (schoolwide target: ~18% of ENROLLEES)
+    # 16. FINAL aid for new admits (need-based; honor the offer)
     AID_RATE = 0.18
 
-    enrolled_idx = df.index[
-    (df["enrolled"] == 1) &
-    (df["aid_offer_amount"] > 0)
-    ]
-    n_enrolled = len(enrolled_idx)
-    n_aid = int(round(AID_RATE * n_enrolled))
+    df["aid_offered_amount"] = 0.0
+    df["aid_offered_pct_tuition"] = 0.0
 
-    if n_enrolled > 0 and n_aid > 0:
-        elig = df.loc[enrolled_idx].copy()
+    enrolled_mask = df["enrolled"] == 1
+    n_enrolled = int(enrolled_mask.sum())
+    target_n_aid = int(round(AID_RATE * n_enrolled))
 
-        # weights: favor need 
+    # Only enrolled students who were offered aid are eligible
+    pool = df[enrolled_mask & (df["aid_offer_amount"] > 0)].copy()
+
+    if len(pool) > 0 and target_n_aid > 0:
+        target_n_aid = min(target_n_aid, len(pool))
+
+        # Need-based weights
         w = (
             1.0
-            + 2.5 * (elig["income_band"] == "<75k").astype(float)
-            + 1.2 * (elig["income_band"] == "75–150k").astype(float)
-            + 0.3 * (elig["income_band"] == "150–250k").astype(float)
-            + 0.6 * (elig["family_size"] - 4).clip(lower=0)
-            + 0.6 * elig["tuition_enrolled_children"].clip(lower=0)
-            - 0.2 * elig["ses_centered"]
+            + 3.0 * (pool["income_band"] == "<75k").astype(float)
+            + 1.5 * (pool["income_band"] == "75–150k").astype(float)
+            + 0.5 * (pool["income_band"] == "150–250k").astype(float)
+            + 0.7 * (pool["family_size"] - 4).clip(lower=0)
+            + 0.9 * pool["tuition_enrolled_children"].clip(lower=0)
+            - 0.2 * pool["ses_centered"]
         ).clip(lower=0.01)
 
         probs = (w / w.sum()).to_numpy()
-        aid_idx = rng.choice(enrolled_idx, size=min(n_aid, n_enrolled), replace=False, p=probs)
-        awarded = df.loc[aid_idx].copy()
+        chosen_idx = rng.choice(pool.index.to_numpy(), size=target_n_aid, replace=False, p=probs)
 
-        # reuse the same mapping + chart distributions as Step 14
-        def map_to_school_income_bin(income_band: str) -> str:
-            if income_band == "<75k":
-                return "50-100"
-            if income_band == "75–150k":
-                return "100-150"
-            if income_band in ("150–250k", ">250k"):
-                return ">150"
-            return ">150"
-
-        def to_key(bin_str: str) -> str:
-            if bin_str == "50-100":
-                return "50-100"
-            if bin_str == "100-150":
-                return "100-150"
-            if bin_str == ">150":
-                return ">150"
-            return "50-100"
-
-        ONE_AMT = {
-            "<=50":    dict(mean=22474, low=10000, high=26500),
-            "50-100":  dict(mean=17258, low=4750,  high=26750),
-            "100-150": dict(mean=7327,  low=8000,  high=23250),
-            ">150":    dict(mean=0,     low=0,     high=0),
-        }
-        MULTI_AMT = {
-            "<=50":    dict(mean=24137, low=20000, high=31500),
-            "50-100":  dict(mean=19902, low=10250, high=26750),
-            "100-150": dict(mean=14494, low=1000,  high=28000),
-            ">150":    dict(mean=0,     low=0,     high=0),
-        }
-
-        awarded["school_income_bin"] = awarded["income_band"].astype(str).map(map_to_school_income_bin)
-        awarded["k"] = awarded["school_income_bin"].map(to_key)
-        awarded["multi_child"] = (awarded["tuition_enrolled_children"] >= 2)
-
-        final_amt = np.zeros(len(awarded), dtype=float)
-        for j, (mc, k, tuit) in enumerate(zip(
-            awarded["multi_child"].to_numpy(),
-            awarded["k"].to_numpy(),
-            awarded["tuition"].to_numpy(dtype=float)
-        )):
-            d = (MULTI_AMT if mc else ONE_AMT)[k]
-            if d["high"] <= 0:
-                amt = 0.0
-            else:
-                sd = max((d["high"] - d["low"]) / 6, 1.0)
-                amt = rtruncnorm(rng, d["mean"], sd, d["low"], d["high"], size=1)[0]
-            final_amt[j] = min(amt, tuit)
-
-        df.loc[awarded.index, "aid_offered_amount"] = final_amt
-        df.loc[awarded.index, "aid_offered_pct_tuition"] = (
-            df.loc[awarded.index, "aid_offered_amount"] / df.loc[awarded.index, "tuition"]
+        # Honor the offer exactly
+        df.loc[chosen_idx, "aid_offered_amount"] = df.loc[chosen_idx, "aid_offer_amount"]
+        df.loc[chosen_idx, "aid_offered_pct_tuition"] = (
+            df.loc[chosen_idx, "aid_offered_amount"] / df.loc[chosen_idx, "tuition"]
         ).clip(0, 1)
+
 
     return df
 
