@@ -206,13 +206,12 @@ def simulate_applicants(
         ).head(seats).index
         df.loc[idx, "spot_offered"] = 1
 
-    # 14. Aid offered (updated to match recent distribution chart)
-    df["aid_offered_pct_tuition"] = 0.0
-    df["aid_offered_amount"] = 0.0
+    # 14. Aid OFFER (used to drive enrollment decision)
+    df["aid_offer_pct_tuition"] = 0.0
+    df["aid_offer_amount"] = 0.0
 
     eligible = df[(df["spot_offered"] == 1) & (df["aid_requested"] == 1)].copy()
 
-    # --- helper: truncated normal without scipy (rejection sampling) ---
     def rtruncnorm(rng, mean, sd, low, high, size):
         out = np.empty(size, dtype=float)
         i = 0
@@ -221,15 +220,13 @@ def simulate_applicants(
             draw = draw[(draw >= low) & (draw <= high)]
             take = min(len(draw), size - i)
             if take > 0:
-                out[i:i+take] = draw[:take]
+                out[i:i + take] = draw[:take]
                 i += take
-    return out
+        return out
 
-# --- map your income_band -> school bins (approx; replace if you have numeric income) ---
-# School bins: <=50k, 50-100k, 100-150k, >150k  :contentReference[oaicite:2]{index=2}
     def map_to_school_income_bin(income_band: str) -> str:
         if income_band == "<75k":
-            return "50-100"   # lumping <75k into <=100k bucket (approx)
+            return "50-100"   # approx (you don't have numeric income yet)
         if income_band == "75–150k":
             return "100-150"
         if income_band in ("150–250k", ">250k"):
@@ -237,29 +234,22 @@ def simulate_applicants(
         return ">150"
 
     eligible["school_income_bin"] = eligible["income_band"].astype(str).map(map_to_school_income_bin)
-
-    # --- one child vs. more than one child in tuition-required school ---
-    # Using variable tuition_enrolled_children as the proxy:
     eligible["multi_child"] = (eligible["tuition_enrolled_children"] >= 2)
 
-    # --- Distribution params from chart (amounts in $) ---
-    # One child :contentReference[oaicite:3]{index=3}
     ONE = {
-        "<=50":   dict(p_award=29/29, mean=22474, low=10000, high=26500),
-        "50-100": dict(p_award=31/33, mean=17258, low=4750,  high=26750),
-        "100-150":dict(p_award=7/13,  mean=7327,  low=8000,  high=23250),
-        ">150":   dict(p_award=0/8,   mean=0,     low=0,     high=0),
+        "<=50":    dict(p_award=29/29, mean=22474, low=10000, high=26500),
+        "50-100":  dict(p_award=31/33, mean=17258, low=4750,  high=26750),
+        "100-150": dict(p_award=7/13,  mean=7327,  low=8000,  high=23250),
+        ">150":    dict(p_award=0/8,   mean=0,     low=0,     high=0),
     }
 
-    # More than one child :contentReference[oaicite:4]{index=4}
     MULTI = {
-        "<=50":   dict(p_award=31/31, mean=24137, low=20000, high=31500),
-        "50-100": dict(p_award=41/41, mean=19902, low=10250, high=26750),
-        "100-150":dict(p_award=43/43, mean=14494, low=1000,  high=28000),
-        ">150":   dict(p_award=0.0,   mean=0,     low=0,     high=0),  # not shown; keep 0
+        "<=50":    dict(p_award=31/31, mean=24137, low=20000, high=31500),
+        "50-100":  dict(p_award=41/41, mean=19902, low=10250, high=26750),
+        "100-150": dict(p_award=43/43, mean=14494, low=1000,  high=28000),
+        ">150":    dict(p_award=0.0,   mean=0,     low=0,     high=0),
     }
 
-    # Convert school_income_bin strings into keys above
     def to_key(bin_str: str) -> str:
         if bin_str == "50-100":
             return "50-100"
@@ -267,12 +257,10 @@ def simulate_applicants(
             return "100-150"
         if bin_str == ">150":
             return ">150"
-        # fallback (if you later add <=50k logic)
         return "50-100"
 
     eligible["k"] = eligible["school_income_bin"].map(to_key)
 
-    # --- decide who gets an award using band-specific probabilities ---
     p = np.array([
         (MULTI if mc else ONE)[k]["p_award"]
         for mc, k in zip(eligible["multi_child"].to_numpy(), eligible["k"].to_numpy())
@@ -281,8 +269,6 @@ def simulate_applicants(
     eligible["aid_awarded"] = rng.random(len(eligible)) < p
     awarded = eligible[eligible["aid_awarded"]].copy()
 
-    # --- draw award AMOUNTS from (low, high) with mean-centered truncated normal ---
-    # Choose sd so most mass sits inside the range (rule of thumb: range/6)
     params = []
     for mc, k in zip(awarded["multi_child"].to_numpy(), awarded["k"].to_numpy()):
         d = (MULTI if mc else ONE)[k]
@@ -293,43 +279,22 @@ def simulate_applicants(
     lows  = np.array([t[2] for t in params], float)
     highs = np.array([t[3] for t in params], float)
 
-    award_amt = np.empty(len(awarded), dtype=float)
+    offer_amt = np.empty(len(awarded), dtype=float)
     for i in range(len(awarded)):
         if highs[i] <= 0:
-            award_amt[i] = 0.0
+            offer_amt[i] = 0.0
         else:
-            award_amt[i] = rtruncnorm(rng, means[i], sds[i], lows[i], highs[i], size=1)[0]
+            offer_amt[i] = rtruncnorm(rng, means[i], sds[i], lows[i], highs[i], size=1)[0]
 
-    # --- cap at tuition (prevents awards > tuition) ---
     tuition = awarded["tuition"].to_numpy(dtype=float)
-    award_amt = np.minimum(award_amt, tuition)
+    offer_amt = np.minimum(offer_amt, tuition)
 
-    df.loc[awarded.index, "aid_offered_amount"] = award_amt
-    df.loc[awarded.index, "aid_offered_pct_tuition"] = (award_amt / tuition).clip(0, 1)
+    df.loc[awarded.index, "aid_offer_amount"] = offer_amt
+    df.loc[awarded.index, "aid_offer_pct_tuition"] = (offer_amt / tuition).clip(0, 1)
 
-    # ---- Aid budget calibration (iterative scale -> cap) ----
-    TARGET_TOTAL_AID = 3_200_000
-
-    mask = df["aid_offered_amount"] > 0
-    for _ in range(10):
-        current_total = df.loc[mask, "aid_offered_amount"].sum()
-        if current_total <= 0:
-            break
-
-        scale = TARGET_TOTAL_AID / current_total
-        df.loc[mask, "aid_offered_amount"] *= scale
-
-        # re-cap after scaling (some may exceed tuition after scaling)
-        df.loc[mask, "aid_offered_amount"] = np.minimum(
-            df.loc[mask, "aid_offered_amount"],
-            df.loc[mask, "tuition"]
-        )
-
-    # recompute pct after final capping
-    mask = df["aid_offered_amount"] > 0
-    df.loc[mask, "aid_offered_pct_tuition"] = (
-        df.loc[mask, "aid_offered_amount"] / df.loc[mask, "tuition"]
-    ).clip(0, 1)
+    # initialize final aid columns (will be overwritten post-enrollment)
+    df["aid_offered_amount"] = 0.0
+    df["aid_offered_pct_tuition"] = 0.0
 
     # 15. Enrollment decision
     df["enrolled"] = 0
@@ -348,7 +313,7 @@ def simulate_applicants(
 
     logit = (
         1.0
-        + (0.8 + aid_slope) * df.loc[mask, "aid_offered_pct_tuition"]
+        + (0.8 + aid_slope) * df.loc[mask, "aid_offer_pct_tuition"]
         + 0.9 * df.loc[mask, "legacy_status"]
         + 0.6 * df.loc[mask, "tuition_enrolled_children"]
         + 0.25 * z_test_m
@@ -357,8 +322,87 @@ def simulate_applicants(
 
     df.loc[mask, "enrolled"] = rng.binomial(1, 1 / (1 + np.exp(-logit)))
 
-    return df
+    # 16. FINAL financial aid (schoolwide target: ~18% of ENROLLEES)
+    AID_RATE = 0.18
 
+    enrolled_idx = df.index[df["enrolled"] == 1].to_numpy()
+    n_enrolled = len(enrolled_idx)
+    n_aid = int(round(AID_RATE * n_enrolled))
+
+    if n_enrolled > 0 and n_aid > 0:
+        elig = df.loc[enrolled_idx].copy()
+
+        # weights: favor need 
+        w = (
+            1.0
+            + 2.5 * (elig["income_band"] == "<75k").astype(float)
+            + 1.2 * (elig["income_band"] == "75–150k").astype(float)
+            + 0.3 * (elig["income_band"] == "150–250k").astype(float)
+            + 0.6 * (elig["family_size"] - 4).clip(lower=0)
+            + 0.6 * elig["tuition_enrolled_children"].clip(lower=0)
+            - 0.2 * elig["ses_centered"]
+        ).clip(lower=0.01)
+
+        probs = (w / w.sum()).to_numpy()
+        aid_idx = rng.choice(enrolled_idx, size=min(n_aid, n_enrolled), replace=False, p=probs)
+        awarded = df.loc[aid_idx].copy()
+
+        # reuse the same mapping + chart distributions as Step 14
+        def map_to_school_income_bin(income_band: str) -> str:
+            if income_band == "<75k":
+                return "50-100"
+            if income_band == "75–150k":
+                return "100-150"
+            if income_band in ("150–250k", ">250k"):
+                return ">150"
+            return ">150"
+
+        def to_key(bin_str: str) -> str:
+            if bin_str == "50-100":
+                return "50-100"
+            if bin_str == "100-150":
+                return "100-150"
+            if bin_str == ">150":
+                return ">150"
+            return "50-100"
+
+        ONE_AMT = {
+            "<=50":    dict(mean=22474, low=10000, high=26500),
+            "50-100":  dict(mean=17258, low=4750,  high=26750),
+            "100-150": dict(mean=7327,  low=8000,  high=23250),
+            ">150":    dict(mean=0,     low=0,     high=0),
+        }
+        MULTI_AMT = {
+            "<=50":    dict(mean=24137, low=20000, high=31500),
+            "50-100":  dict(mean=19902, low=10250, high=26750),
+            "100-150": dict(mean=14494, low=1000,  high=28000),
+            ">150":    dict(mean=0,     low=0,     high=0),
+        }
+
+        awarded["school_income_bin"] = awarded["income_band"].astype(str).map(map_to_school_income_bin)
+        awarded["k"] = awarded["school_income_bin"].map(to_key)
+        awarded["multi_child"] = (awarded["tuition_enrolled_children"] >= 2)
+
+        final_amt = np.zeros(len(awarded), dtype=float)
+        for j, (mc, k, tuit) in enumerate(zip(
+            awarded["multi_child"].to_numpy(),
+            awarded["k"].to_numpy(),
+            awarded["tuition"].to_numpy(dtype=float)
+        )):
+            d = (MULTI_AMT if mc else ONE_AMT)[k]
+            if d["high"] <= 0:
+                amt = 0.0
+            else:
+                sd = max((d["high"] - d["low"]) / 6, 1.0)
+                amt = rtruncnorm(rng, d["mean"], sd, d["low"], d["high"], size=1)[0]
+            final_amt[j] = min(amt, tuit)
+
+        df.loc[awarded.index, "aid_offered_amount"] = final_amt
+        df.loc[awarded.index, "aid_offered_pct_tuition"] = (
+            df.loc[awarded.index, "aid_offered_amount"] / df.loc[awarded.index, "tuition"]
+        ).clip(0, 1)
+
+    return df
 
 def simulate_many_years(
     n_years: int,
