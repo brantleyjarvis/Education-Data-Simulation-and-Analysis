@@ -87,6 +87,19 @@ def build_zip_df(
         "zip_pct_bachelors_plus",
         "zip_pct_children",
     ]
+    # --- Coalesce merged ACS columns into canonical names (handles _x/_y suffixes) ---
+    for base in [
+        "zip_income_median",
+        "zip_home_value_median",
+        "zip_pct_bachelors_plus",
+        "zip_pct_children",
+    ]:
+        if base not in zip_acs.columns:
+            if f"{base}_x" in zip_acs.columns:
+                zip_acs[base] = zip_acs[f"{base}_x"]
+            elif f"{base}_y" in zip_acs.columns:
+                zip_acs[base] = zip_acs[f"{base}_y"]
+    # --- end coalesce ---
     for col in num_cols:
         zip_acs[col] = pd.to_numeric(zip_acs[col], errors="coerce").replace(ACS_SENTINELS, np.nan)
 
