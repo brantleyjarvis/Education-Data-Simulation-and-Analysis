@@ -212,32 +212,26 @@ def simulate_applicants(
 
     eligible = df[(df["spot_offered"] == 1) & (df["aid_requested"] == 1)].copy()
 
-    def rtrunc_lognormal(rng, mean, low, high, size, sigma=0.6):
+    def rtrunc_lognormal(rng, mean, low, high, size, sigma=0.65):
         """
-        Right-skewed truncated lognormal sampler.
+        Right-skewed truncated lognormal sampler (no per-draw rescaling).
         - sigma controls skew (0.5–0.8 reasonable)
-        - mean is approximate; final mean will be close but not exact
+        - mean is used to set the underlying lognormal mean before truncation
         """
+        # guard against impossible/inconsistent params (like mean < low)
+        mean_eff = min(max(mean, low * 1.001), high * 0.999)
+
+        mu = np.log(mean_eff) - 0.5 * sigma**2
+
         out = np.empty(size, dtype=float)
         i = 0
-
-        # lognormal parameters
-        mu = np.log(mean) - 0.5 * sigma**2
-
         while i < size:
-            draw = rng.lognormal(mean=mu, sigma=sigma, size=(size - i) * 3)
+            draw = rng.lognormal(mean=mu, sigma=sigma, size=(size - i) * 10)
             draw = draw[(draw >= low) & (draw <= high)]
             take = min(len(draw), size - i)
             if take > 0:
                 out[i:i + take] = draw[:take]
-                i += take
-
-        # rescale to hit the desired mean (approximately)
-        out *= mean / out.mean()
-
-        # re-truncate in case rescaling pushed bounds
-        out = np.clip(out, low, high)
-
+                i += take 
         return out
 
     def map_to_school_income_bin(income_band: str) -> str:
