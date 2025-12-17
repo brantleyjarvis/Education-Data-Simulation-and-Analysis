@@ -289,20 +289,20 @@ def simulate_applicants(
 
     eligible["school_income_bin"] = eligible["income_band"].astype(str).map(map_to_school_income_bin)
     eligible["multi_child"] = (eligible["tuition_enrolled_children"] >= 2)
-
+        
     ONE = {
-        "<=50":    dict(p_award=29/29, mean=22474, low=10000, high=26500),
-        "50-100":  dict(p_award=31/33, mean=17258, low=4750,  high=26750),
-        "100-150": dict(p_award=7/13,  mean=7327,  low=8000,  high=23250),
-        ">150":    dict(p_award=0/8,   mean=0,     low=0,     high=0),
-    }
-
+            "<=50":    dict(p_award=0.95, mean=22474, low=10000, high=26500),
+            "50-100":  dict(p_award=0.90, mean=17258, low=4750,  high=26750),
+            "100-150": dict(p_award=0.85, mean=7327,  low=8000,  high=23250),
+            ">150":    dict(p_award=0.00, mean=0,     low=0,     high=0),
+        }
+        
     MULTI = {
-        "<=50":    dict(p_award=31/31, mean=24137, low=20000, high=31500),
-        "50-100":  dict(p_award=41/41, mean=19902, low=10250, high=26750),
-        "100-150": dict(p_award=43/43, mean=14494, low=1000,  high=28000),
-        ">150":    dict(p_award=0.0,   mean=0,     low=0,     high=0),
-    }
+            "<=50":    dict(p_award=0.98, mean=24137, low=20000, high=31500),
+            "50-100":  dict(p_award=0.95, mean=19902, low=10250, high=26750),
+            "100-150": dict(p_award=0.90, mean=14494, low=1000,  high=28000),
+            ">150":    dict(p_award=0.00, mean=0,     low=0,     high=0),
+        }
 
     def to_key(bin_str: str) -> str:
         if bin_str == "50-100":
