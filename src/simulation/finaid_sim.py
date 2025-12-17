@@ -438,6 +438,33 @@ def simulate_applicants(
         # Force-enroll selected waitlist candidates
         df.loc[fill_idx, "spot_offered"] = 1
         df.loc[fill_idx, "enrolled"] = 1
+
+    # 15.6 Generate aid offers for waitlist admits who requested aid
+    
+    need_offer = (
+        (df["spot_offered"] == 1) &
+        (df["enrolled"] == 1) &
+        (df["aid_requested"] == 1) &
+        (df["offer_amount"] == 0) &   # no offer yet (missed Step 14)
+        (df["income_band"].isin(["<75k", "75–150k"]))  # enforce $150k rule
+    )
+    
+    idx = df.index[need_offer]
+    
+    if len(idx) > 0:
+        # Same offer distribution as Step 14 (right-skewed, mean ~0.65)
+        A, B = 6.5, 3.0
+        aid_pct = rng.beta(A, B, size=len(idx)).clip(0.20, 1.00)
+    
+        # Multi-child bump (consistent with Step 14)
+        mc = (df.loc[idx, "tuition_enrolled_children"].to_numpy() >= 2)
+        aid_pct = (aid_pct * np.where(mc, 1.08, 1.0)).clip(0.20, 1.00)
+    
+        tuition = df.loc[idx, "tuition"].to_numpy(dtype=float)
+        offer_amt = np.minimum(aid_pct * tuition, tuition)
+    
+        df.loc[idx, "offer_amount"] = offer_amt
+        df.loc[idx, "offer_pct_tuition"] = (offer_amt / tuition).clip(0, 1)
     
     # 16. FINAL aid for new admits (need-based; honor the offer)
     #     POLICY TARGET:
