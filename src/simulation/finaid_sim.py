@@ -204,9 +204,9 @@ def simulate_applicants(
     df["spot_offered"] = 0
     
     # Tunables
-    CUTOFF_QUANTILE = 0.55   # raise this to reduce low-index admits (e.g., 0.60)
-    MIN_CUTOFF = -0.75       # absolute floor (raise toward 0 to be stricter, e.g., -0.5)
-    EXCEPTION_RATE = 0.05    # small % of below-cutoff still admitted (set 0.0 for none)
+    CUTOFF_QUANTILE = 0.65   # raise this to reduce low-index admits (e.g., 0.60)
+    MIN_CUTOFF = -0.5       # absolute floor (raise toward 0 to be stricter, e.g., -0.5)
+    EXCEPTION_RATE = 0.03    # small % of below-cutoff still admitted (set 0.0 for none)
     
     for g, seats in seat_quota.items():
         sub = df[df["grade_applying_to"] == g].copy()
