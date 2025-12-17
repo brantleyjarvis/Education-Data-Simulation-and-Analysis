@@ -368,7 +368,7 @@ def simulate_applicants(
     )
 
     logit = (
-        1.0
+        1.8
         + (0.8 + aid_slope) * df.loc[mask, "aid_offer_pct_tuition"]
         + 0.9 * df.loc[mask, "legacy_status"]
         + 0.6 * df.loc[mask, "tuition_enrolled_children"]
