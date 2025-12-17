@@ -200,11 +200,45 @@ def simulate_applicants(
         income_bonus
     )
 
+    # Reset offers
+    df["spot_offered"] = 0
+    
+    # Tunables
+    CUTOFF_QUANTILE = 0.55   # raise this to reduce low-index admits (e.g., 0.60)
+    MIN_CUTOFF = -0.75       # absolute floor (raise toward 0 to be stricter, e.g., -0.5)
+    EXCEPTION_RATE = 0.05    # small % of below-cutoff still admitted (set 0.0 for none)
+    
     for g, seats in seat_quota.items():
-        idx = df[df["grade_applying_to"] == g].sort_values(
-            "admit_index", ascending=False
-        ).head(seats).index
-        df.loc[idx, "spot_offered"] = 1
+        sub = df[df["grade_applying_to"] == g].copy()
+        if len(sub) == 0:
+            continue
+    
+        # Grade-specific cutoff (prevents "everyone admitted" when applicant pool is small)
+        cutoff = max(sub["admit_index"].quantile(CUTOFF_QUANTILE), MIN_CUTOFF)
+    
+        # Primary admissible pool
+        admissible = sub[sub["admit_index"] >= cutoff].copy()
+    
+        # If admissible pool is empty (can happen in tiny grades), fall back to top few
+        if len(admissible) == 0:
+            admissible = sub.sort_values("admit_index", ascending=False).head(min(seats, len(sub)))
+    
+        # Offer up to seats from admissible (deterministic top-N within admissible)
+        offer_idx = admissible.sort_values("admit_index", ascending=False).head(min(seats, len(admissible))).index
+        df.loc[offer_idx, "spot_offered"] = 1
+    
+        # Optional: rare "committee exceptions" among remaining below-cutoff applicants
+        remaining_seats = seats - len(offer_idx)
+        if remaining_seats > 0 and EXCEPTION_RATE > 0:
+            below = sub.loc[~sub.index.isin(offer_idx)]
+            if len(below) > 0:
+                # Only allow exceptions from the "near miss" band, not the extreme bottom tail
+                near_miss = below[below["admit_index"] >= (cutoff - 0.5)]
+                if len(near_miss) > 0:
+                    n_ex = min(remaining_seats, int(np.ceil(EXCEPTION_RATE * len(sub))))
+                    if n_ex > 0:
+                        ex_idx = rng.choice(near_miss.index.to_numpy(), size=min(n_ex, len(near_miss)), replace=False)
+                        df.loc[ex_idx, "spot_offered"] = 1
 
     # 14. Aid OFFER (used to drive enrollment decision)
 
