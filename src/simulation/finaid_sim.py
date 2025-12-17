@@ -378,6 +378,38 @@ def simulate_applicants(
 
     df.loc[mask, "enrolled"] = rng.binomial(1, 1 / (1 + np.exp(-logit)))
 
+    # 15.5 Waitlist fill to meet seat quotas (realistic)
+    
+    for g, seats in seat_quota.items():
+    
+        # Currently enrolled in this grade
+        enrolled_idx = df[
+            (df["grade_applying_to"] == g) &
+            (df["enrolled"] == 1)
+        ].index
+    
+        shortfall = seats - len(enrolled_idx)
+    
+        # If already full (or overfull), do nothing
+        if shortfall <= 0:
+            continue
+    
+        # Waitlist pool: not enrolled, ordered by admit_index
+        waitlist = df[
+            (df["grade_applying_to"] == g) &
+            (df["enrolled"] == 0)
+        ].sort_values("admit_index", ascending=False)
+    
+        if len(waitlist) == 0:
+            continue
+    
+        # Take top candidates to fill the gap
+        fill_idx = waitlist.head(shortfall).index
+    
+        # Force enrollment (this mimics waitlist conversion)
+        df.loc[fill_idx, "spot_offered"] = 1
+        df.loc[fill_idx, "enrolled"] = 1
+
     # 16. FINAL aid for new admits (need-based; honor the offer)
     #     - Select ~AID_RATE of ENROLLED students to actually receive aid
     #     - Only income < $150k
