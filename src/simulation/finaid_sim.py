@@ -450,7 +450,7 @@ def simulate_applicants(
         inplace=True
     )
     
-return df
+    return df
 
 def simulate_many_years(
     n_years: int,
