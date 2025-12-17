@@ -381,7 +381,7 @@ def simulate_applicants(
     # 15.5 Waitlist fill to meet seat quotas (sweet-spot version)
     
     TARGET_FILL_RATE = 0.90       # minimum acceptable fill
-    NEAR_MISS_DELTA = 0.50        # how far below cutoff we allow (tunable)
+    NEAR_MISS_DELTA = 0.6        # how far below cutoff we allow (tunable)
     ABSOLUTE_FLOOR = -1.25        # never admit below this admit_index
     
     for g, seats in seat_quota.items():
