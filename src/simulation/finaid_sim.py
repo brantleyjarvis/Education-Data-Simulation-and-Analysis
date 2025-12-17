@@ -127,10 +127,10 @@ def simulate_applicants(
 
     # 11. Aid requested
     base_p = df["income_band"].map({
-        "<75k": 0.95,
-        "75–150k": 0.85,
-        "150–250k": 0.20,
-        ">250k": 0.03
+        "<75k": 0.99,
+        "75–150k": 0.90,
+        "150–250k": 0.01,
+        ">250k": 0.0001
     })
 
     logit = np.log(base_p / (1 - base_p))
@@ -207,8 +207,6 @@ def simulate_applicants(
         df.loc[idx, "spot_offered"] = 1
 
     # 14. Aid OFFER (used to drive enrollment decision)
-    df["aid_offer_pct_tuition"] = 0.0
-    df["aid_offer_amount"] = 0.0
 
     eligible = df[(df["spot_offered"] == 1) & (df["aid_requested"] == 1)].copy()
 
@@ -340,41 +338,60 @@ def simulate_applicants(
     df.loc[mask, "enrolled"] = rng.binomial(1, 1 / (1 + np.exp(-logit)))
 
     # 16. FINAL aid for new admits (need-based; honor the offer)
-    AID_RATE = 0.18
-
+    
+    AID_RATE = 0.18  # matches overall school aid rate
+    
+    # Initialize FINAL aid columns (these are the ones to use for EDA / reporting)
     df["aid_offered_amount"] = 0.0
     df["aid_offered_pct_tuition"] = 0.0
-
+    
+    # Identify enrolled students
     enrolled_mask = df["enrolled"] == 1
     n_enrolled = int(enrolled_mask.sum())
+    
+    # Target number of aid recipients among enrolled
     target_n_aid = int(round(AID_RATE * n_enrolled))
-
-    # Only enrolled students who were offered aid are eligible
-    pool = df[enrolled_mask & (df["aid_offer_amount"] > 0)].copy()
-
-    if len(pool) > 0 and target_n_aid > 0:
-        target_n_aid = min(target_n_aid, len(pool))
-
-        # Need-based weights
+    
+    #   Aid ONLY for income < $150k
+    #   Must have received a positive aid OFFER
+    eligible_pool = df[
+        enrolled_mask &
+        (df["aid_offer_amount"] > 0) &
+        (df["income_band"].isin(["<75k", "75–150k"]))
+    ].copy()
+    
+    # Guardrails
+    if len(eligible_pool) > 0 and target_n_aid > 0:
+    
+        # Cannot award more aid than eligible students
+        target_n_aid = min(target_n_aid, len(eligible_pool))
+    
+        # Need-based selection weights
         w = (
             1.0
-            + 3.0 * (pool["income_band"] == "<75k").astype(float)
-            + 1.5 * (pool["income_band"] == "75–150k").astype(float)
-            + 0.5 * (pool["income_band"] == "150–250k").astype(float)
-            + 0.7 * (pool["family_size"] - 4).clip(lower=0)
-            + 0.9 * pool["tuition_enrolled_children"].clip(lower=0)
-            - 0.2 * pool["ses_centered"]
+            + 3.0 * (eligible_pool["income_band"] == "<75k").astype(float)
+            + 1.5 * (eligible_pool["income_band"] == "75–150k").astype(float)
+            + 0.7 * (eligible_pool["family_size"] - 4).clip(lower=0)
+            + 0.9 * eligible_pool["tuition_enrolled_children"].clip(lower=0)
+            - 0.2 * eligible_pool["ses_centered"]
         ).clip(lower=0.01)
-
+    
         probs = (w / w.sum()).to_numpy()
-        chosen_idx = rng.choice(pool.index.to_numpy(), size=target_n_aid, replace=False, p=probs)
-
-        # Honor the offer exactly
+    
+        # Select aid recipients
+        chosen_idx = rng.choice(
+            eligible_pool.index.to_numpy(),
+            size=target_n_aid,
+            replace=False,
+            p=probs
+        )
+    
+        # Honor the original aid OFFER exactly
         df.loc[chosen_idx, "aid_offered_amount"] = df.loc[chosen_idx, "aid_offer_amount"]
         df.loc[chosen_idx, "aid_offered_pct_tuition"] = (
-            df.loc[chosen_idx, "aid_offered_amount"] / df.loc[chosen_idx, "tuition"]
+            df.loc[chosen_idx, "aid_offered_amount"] /
+            df.loc[chosen_idx, "tuition"]
         ).clip(0, 1)
-
 
     return df
 
