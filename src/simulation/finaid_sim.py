@@ -378,43 +378,64 @@ def simulate_applicants(
 
     df.loc[mask, "enrolled"] = rng.binomial(1, 1 / (1 + np.exp(-logit)))
     
-    # 15.5 Waitlist fill to meet seat quotas (quality-constrained)
+    # 15.5 Waitlist fill to meet seat quotas (sweet-spot version)
+    
+    TARGET_FILL_RATE = 0.90       # minimum acceptable fill
+    NEAR_MISS_DELTA = 0.50        # how far below cutoff we allow (tunable)
+    ABSOLUTE_FLOOR = -1.25        # never admit below this admit_index
     
     for g, seats in seat_quota.items():
     
-        # Currently enrolled in this grade
-        enrolled_idx = df[
-            (df["grade_applying_to"] == g) &
-            (df["enrolled"] == 1)
-        ].index
-    
-        shortfall = seats - len(enrolled_idx)
-        if shortfall <= 0:
-            continue
-    
-        # Pull full grade pool
         sub = df[df["grade_applying_to"] == g].copy()
         if len(sub) == 0:
             continue
     
-        # Recompute grade-specific cutoff (same logic as Step 13)
+        # Current enrollment
+        enrolled_idx = sub[sub["enrolled"] == 1].index
+        current_fill = len(enrolled_idx) / seats
+    
+        if current_fill >= TARGET_FILL_RATE:
+            continue
+    
+        shortfall = int(np.ceil(TARGET_FILL_RATE * seats - len(enrolled_idx)))
+        if shortfall <= 0:
+            continue
+    
+        # Recompute grade-specific cutoff (same as Step 13)
         cutoff = max(
             sub["admit_index"].quantile(CUTOFF_QUANTILE),
             MIN_CUTOFF
         )
     
-        # Eligible waitlist = not enrolled, above cutoff
-        waitlist = sub[
+        # Tier 1: standard admissible waitlist
+        tier1 = sub[
             (sub["enrolled"] == 0) &
             (sub["admit_index"] >= cutoff)
         ].sort_values("admit_index", ascending=False)
     
-        if len(waitlist) == 0:
+        fill_idx = []
+    
+        if len(tier1) > 0:
+            take = min(shortfall, len(tier1))
+            fill_idx.extend(tier1.head(take).index.tolist())
+            shortfall -= take
+    
+        # Tier 2: near-miss band (controlled relaxation)
+        if shortfall > 0:
+            tier2 = sub[
+                (sub["enrolled"] == 0) &
+                (sub["admit_index"] < cutoff) &
+                (sub["admit_index"] >= max(cutoff - NEAR_MISS_DELTA, ABSOLUTE_FLOOR))
+            ].sort_values("admit_index", ascending=False)
+    
+            if len(tier2) > 0:
+                take = min(shortfall, len(tier2))
+                fill_idx.extend(tier2.head(take).index.tolist())
+    
+        if len(fill_idx) == 0:
             continue
     
-        # Fill only from admissible waitlist
-        fill_idx = waitlist.head(shortfall).index
-    
+        # Force-enroll selected waitlist candidates
         df.loc[fill_idx, "spot_offered"] = 1
         df.loc[fill_idx, "enrolled"] = 1
     
