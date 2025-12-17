@@ -280,30 +280,23 @@ def simulate_applicants(
     eligible["aid_awarded"] = rng.random(len(eligible)) < p
     awarded = eligible[eligible["aid_awarded"]].copy()
 
-    params = []
-    for mc, k in zip(awarded["multi_child"].to_numpy(), awarded["k"].to_numpy()):
-        d = (MULTI if mc else ONE)[k]
-        params.append((d["mean"], max((d["high"] - d["low"]) / 6, 1.0), d["low"], d["high"]))
-
-    means = np.array([t[0] for t in params], float)
-    sds   = np.array([t[1] for t in params], float)
-    lows  = np.array([t[2] for t in params], float)
-    highs = np.array([t[3] for t in params], float)
-
-    offer_amt = np.empty(len(awarded), dtype=float)
-    for i in range(len(awarded)):
-        if highs[i] <= 0:
-            offer_amt[i] = 0.0
-        else:
-            offer_amt[i] = rtrunc_lognormal(
-            rng,
-            mean=means[i],
-            low=lows[i],
-            high=highs[i],
-            size=1,
-            sigma=0.65
-        )[0]
-
+    # Generate aid OFFER as % of tuition (right-skewed)
+    #   mean ≈ 0.65
+    #   right-skewed toward higher aid
+    A, B = 6.5, 3.0   # mean = A / (A + B) ≈ 0.68
+    
+    aid_pct = rng.beta(A, B, size=len(awarded))
+    
+    # Increase skew for multi-child households
+    aid_pct *= np.where(awarded["multi_child"], 1.08, 1.0)
+    
+    # Clip to realistic bounds
+    aid_pct = aid_pct.clip(0.20, 1.00)
+    
+    # Convert to dollars
+    tuition = awarded["tuition"].to_numpy(dtype=float)
+    offer_amt = aid_pct * tuition
+    
     tuition = awarded["tuition"].to_numpy(dtype=float)
     offer_amt = np.minimum(offer_amt, tuition)
 
