@@ -439,116 +439,116 @@ def simulate_applicants(
         df.loc[fill_idx, "spot_offered"] = 1
         df.loc[fill_idx, "enrolled"] = 1
     
-        # 16. FINAL aid for new admits (need-based; honor the offer)
-        #     POLICY TARGET:
-        #       - ~85% of ENROLLED aid requesters (income < $150k) receive aid
-        #       - Must have received a positive aid OFFER
-        #       - If selected, realized aid == offer (exactly)
-        #     Rename variables at end to avoid confusion
-        
-        TARGET_REQUESTER_AID_RATE = 0.85  # << key change: align to known data
-        
-        # 16a) Harden offer columns (critical: no NaNs) ----
-        if "aid_offer_amount" not in df.columns:
-            df["aid_offer_amount"] = 0.0
-        if "aid_offer_pct_tuition" not in df.columns:
-            df["aid_offer_pct_tuition"] = 0.0
-        
-        df["aid_offer_amount"] = pd.to_numeric(df["aid_offer_amount"], errors="coerce").fillna(0.0)
-        df["aid_offer_pct_tuition"] = (
-            pd.to_numeric(df["aid_offer_pct_tuition"], errors="coerce")
+    # 16. FINAL aid for new admits (need-based; honor the offer)
+    #     POLICY TARGET:
+    #       - ~85% of ENROLLED aid requesters (income < $150k) receive aid
+    #       - Must have received a positive aid OFFER
+    #       - If selected, realized aid == offer (exactly)
+    #     Rename variables at end to avoid confusion
+    
+    TARGET_REQUESTER_AID_RATE = 0.85  # << key change: align to known data
+    
+    # 16a) Harden offer columns (critical: no NaNs) ----
+    if "aid_offer_amount" not in df.columns:
+        df["aid_offer_amount"] = 0.0
+    if "aid_offer_pct_tuition" not in df.columns:
+        df["aid_offer_pct_tuition"] = 0.0
+    
+    df["aid_offer_amount"] = pd.to_numeric(df["aid_offer_amount"], errors="coerce").fillna(0.0)
+    df["aid_offer_pct_tuition"] = (
+        pd.to_numeric(df["aid_offer_pct_tuition"], errors="coerce")
+          .fillna(0.0)
+          .clip(0, 1)
+    )
+    
+    # 16b) Initialize REALIZED aid columns (post-enrollment dollars actually paid) 
+    df["aid_offered_amount"] = 0.0
+    df["aid_offered_pct_tuition"] = 0.0
+    
+    # Identify enrolled students
+    enrolled_mask = df["enrolled"] == 1
+    
+    # Eligible pool (IMPORTANT CHANGE):
+    # - enrolled
+    # - requested aid
+    # - positive offer
+    # - income < $150k (and therefore 0 awards above 150k)
+    eligible_pool = df[
+        enrolled_mask
+        & (df["aid_requested"] == 1)
+        & (df["aid_offer_amount"] > 0)
+        & (df["income_band"].isin(["<75k", "75–150k"]))
+    ].copy()
+    
+    # Target number of aid recipients among eligible requesters
+    target_n_aid = int(round(TARGET_REQUESTER_AID_RATE * len(eligible_pool)))
+    
+    # 16c) Need-based selection + honor offer exactly
+    if len(eligible_pool) > 0 and target_n_aid > 0:
+        target_n_aid = min(target_n_aid, len(eligible_pool))
+    
+        w = (
+            1.0
+            + 3.0 * (eligible_pool["income_band"] == "<75k").astype(float)
+            + 1.5 * (eligible_pool["income_band"] == "75–150k").astype(float)
+            + 0.7 * (eligible_pool["family_size"] - 4).clip(lower=0)
+            + 0.9 * eligible_pool["tuition_enrolled_children"].clip(lower=0)
+            - 0.2 * eligible_pool["ses_centered"]
+        )
+    
+        # Make weights robust to NaNs and non-positive totals
+        w = pd.to_numeric(w, errors="coerce").fillna(0.0).clip(lower=0.01)
+        wsum = float(w.sum())
+    
+        if not np.isfinite(wsum) or wsum <= 0:
+            probs = np.ones(len(w), dtype=float) / len(w)
+        else:
+            probs = (w / wsum).to_numpy(dtype=float)
+    
+        chosen_idx = rng.choice(
+            eligible_pool.index.to_numpy(),
+            size=target_n_aid,
+            replace=False,
+            p=probs
+        )
+    
+        # REALIZED aid = OFFER (exactly), only for chosen (enrolled) recipients
+        df.loc[chosen_idx, "aid_offered_amount"] = df.loc[chosen_idx, "aid_offer_amount"]
+    
+        tuition_chosen = pd.to_numeric(df.loc[chosen_idx, "tuition"], errors="coerce").fillna(0.0)
+    
+        df.loc[chosen_idx, "aid_offered_amount"] = np.minimum(
+            df.loc[chosen_idx, "aid_offered_amount"].to_numpy(dtype=float),
+            tuition_chosen.to_numpy(dtype=float)
+        )
+    
+        df.loc[chosen_idx, "aid_offered_pct_tuition"] = np.where(
+            tuition_chosen.to_numpy(dtype=float) > 0,
+            (df.loc[chosen_idx, "aid_offered_amount"].to_numpy(dtype=float) / tuition_chosen.to_numpy(dtype=float)),
+            0.0
+        )
+    
+        df.loc[chosen_idx, "aid_offered_pct_tuition"] = (
+            pd.Series(df.loc[chosen_idx, "aid_offered_pct_tuition"])
               .fillna(0.0)
               .clip(0, 1)
+              .to_numpy()
         )
-        
-        # 16b) Initialize REALIZED aid columns (post-enrollment dollars actually paid) 
-        df["aid_offered_amount"] = 0.0
-        df["aid_offered_pct_tuition"] = 0.0
-        
-        # Identify enrolled students
-        enrolled_mask = df["enrolled"] == 1
-        
-        # Eligible pool (IMPORTANT CHANGE):
-        # - enrolled
-        # - requested aid
-        # - positive offer
-        # - income < $150k (and therefore 0 awards above 150k)
-        eligible_pool = df[
-            enrolled_mask
-            & (df["aid_requested"] == 1)
-            & (df["aid_offer_amount"] > 0)
-            & (df["income_band"].isin(["<75k", "75–150k"]))
-        ].copy()
-        
-        # Target number of aid recipients among eligible requesters
-        target_n_aid = int(round(TARGET_REQUESTER_AID_RATE * len(eligible_pool)))
-        
-        # 16c) Need-based selection + honor offer exactly
-        if len(eligible_pool) > 0 and target_n_aid > 0:
-            target_n_aid = min(target_n_aid, len(eligible_pool))
-        
-            w = (
-                1.0
-                + 3.0 * (eligible_pool["income_band"] == "<75k").astype(float)
-                + 1.5 * (eligible_pool["income_band"] == "75–150k").astype(float)
-                + 0.7 * (eligible_pool["family_size"] - 4).clip(lower=0)
-                + 0.9 * eligible_pool["tuition_enrolled_children"].clip(lower=0)
-                - 0.2 * eligible_pool["ses_centered"]
-            )
-        
-            # Make weights robust to NaNs and non-positive totals
-            w = pd.to_numeric(w, errors="coerce").fillna(0.0).clip(lower=0.01)
-            wsum = float(w.sum())
-        
-            if not np.isfinite(wsum) or wsum <= 0:
-                probs = np.ones(len(w), dtype=float) / len(w)
-            else:
-                probs = (w / wsum).to_numpy(dtype=float)
-        
-            chosen_idx = rng.choice(
-                eligible_pool.index.to_numpy(),
-                size=target_n_aid,
-                replace=False,
-                p=probs
-            )
-        
-            # REALIZED aid = OFFER (exactly), only for chosen (enrolled) recipients
-            df.loc[chosen_idx, "aid_offered_amount"] = df.loc[chosen_idx, "aid_offer_amount"]
-        
-            tuition_chosen = pd.to_numeric(df.loc[chosen_idx, "tuition"], errors="coerce").fillna(0.0)
-        
-            df.loc[chosen_idx, "aid_offered_amount"] = np.minimum(
-                df.loc[chosen_idx, "aid_offered_amount"].to_numpy(dtype=float),
-                tuition_chosen.to_numpy(dtype=float)
-            )
-        
-            df.loc[chosen_idx, "aid_offered_pct_tuition"] = np.where(
-                tuition_chosen.to_numpy(dtype=float) > 0,
-                (df.loc[chosen_idx, "aid_offered_amount"].to_numpy(dtype=float) / tuition_chosen.to_numpy(dtype=float)),
-                0.0
-            )
-        
-            df.loc[chosen_idx, "aid_offered_pct_tuition"] = (
-                pd.Series(df.loc[chosen_idx, "aid_offered_pct_tuition"])
-                  .fillna(0.0)
-                  .clip(0, 1)
-                  .to_numpy()
-            )
-        
-        # 16d) Rename variables to avoid confusion
-        # offer_*     = what was offered pre-enrollment (drives yield)
-        # realized_*  = what is actually paid post-enrollment (use for budget/EDA)
-        df.rename(
-            columns={
-                "aid_offer_amount": "offer_amount",
-                "aid_offer_pct_tuition": "offer_pct_tuition",
-                "aid_offered_amount": "realized_aid_amount",
-                "aid_offered_pct_tuition": "realized_aid_pct_tuition",
-            },
-            inplace=True
-        )
-        
-            return df
+    
+    # 16d) Rename variables to avoid confusion
+    # offer_*     = what was offered pre-enrollment (drives yield)
+    # realized_*  = what is actually paid post-enrollment (use for budget/EDA)
+    df.rename(
+        columns={
+            "aid_offer_amount": "offer_amount",
+            "aid_offer_pct_tuition": "offer_pct_tuition",
+            "aid_offered_amount": "realized_aid_amount",
+            "aid_offered_pct_tuition": "realized_aid_pct_tuition",
+        },
+        inplace=True
+    )
+    
+    return df
 
 def simulate_many_years(
     n_years: int,
