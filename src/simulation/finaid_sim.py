@@ -208,6 +208,9 @@ def simulate_applicants(
 
     # 14. Aid OFFER (used to drive enrollment decision)
 
+    df["aid_offer_amount"] = 0.0
+    df["aid_offer_pct_tuition"] = 0.0
+
     eligible = df[(df["spot_offered"] == 1) & (df["aid_requested"] == 1)].copy()
 
     def rtrunc_lognormal(rng, mean, low, high, size, sigma=0.65):
@@ -315,10 +318,12 @@ def simulate_applicants(
     df["enrolled"] = 0
     mask = df["spot_offered"] == 1
 
+    df.loc[mask, "aid_offer_pct_tuition"] = df.loc[mask, "aid_offer_pct_tuition"].fillna(0.0)
+    
     aid_slope = df.loc[mask, "income_band"].map({
         "<75k": 3.5, "75–150k": 2.8,
         "150–250k": 1.6, ">250k": 0.8
-    })
+    }).fillna(0.0)  #  prevents NaN if income_band is unexpected
 
     z_test_m = (df.loc[mask, "score_testing"] - df["score_testing"].mean()) / df["score_testing"].std()
 
@@ -338,10 +343,30 @@ def simulate_applicants(
     df.loc[mask, "enrolled"] = rng.binomial(1, 1 / (1 + np.exp(-logit)))
 
     # 16. FINAL aid for new admits (need-based; honor the offer)
+    #     - Select ~AID_RATE of ENROLLED students to actually receive aid
+    #     - Only income < $150k
+    #     - Must have received a positive aid OFFER
+    #     - If selected, realized aid == offer (exactly)
+    #     - Rename variables at end to avoid confusion
     
     AID_RATE = 0.18  # matches overall school aid rate
     
-    # Initialize FINAL aid columns (these are the ones to use for EDA / reporting)
+    # 16a) Harden offer columns (critical: no NaNs) ----
+    # (Offer columns are created in Step 14 and used in Step 15; make sure they exist + are clean.)
+    if "aid_offer_amount" not in df.columns:
+        df["aid_offer_amount"] = 0.0
+    if "aid_offer_pct_tuition" not in df.columns:
+        df["aid_offer_pct_tuition"] = 0.0
+    
+    df["aid_offer_amount"] = pd.to_numeric(df["aid_offer_amount"], errors="coerce").fillna(0.0)
+    df["aid_offer_pct_tuition"] = (
+        pd.to_numeric(df["aid_offer_pct_tuition"], errors="coerce")
+          .fillna(0.0)
+          .clip(0, 1)
+    )
+    
+    # 16b) Initialize REALIZED aid columns (post-enrollment dollars actually paid) ----
+    # These are the ones to use for EDA/reporting/budget (once you rename below).
     df["aid_offered_amount"] = 0.0
     df["aid_offered_pct_tuition"] = 0.0
     
@@ -352,21 +377,20 @@ def simulate_applicants(
     # Target number of aid recipients among enrolled
     target_n_aid = int(round(AID_RATE * n_enrolled))
     
-    #   Aid ONLY for income < $150k
-    #   Must have received a positive aid OFFER
+    # Eligible pool:
+    # - enrolled
+    # - positive offer
+    # - income < $150k
     eligible_pool = df[
-        enrolled_mask &
-        (df["aid_offer_amount"] > 0) &
-        (df["income_band"].isin(["<75k", "75–150k"]))
+        enrolled_mask
+        & (df["aid_offer_amount"] > 0)
+        & (df["income_band"].isin(["<75k", "75–150k"]))
     ].copy()
     
-    # Guardrails
+    # 16c) Need-based selection + honor offer exactly 
     if len(eligible_pool) > 0 and target_n_aid > 0:
-    
-        # Cannot award more aid than eligible students
         target_n_aid = min(target_n_aid, len(eligible_pool))
     
-        # Need-based selection weights
         w = (
             1.0
             + 3.0 * (eligible_pool["income_band"] == "<75k").astype(float)
@@ -374,11 +398,17 @@ def simulate_applicants(
             + 0.7 * (eligible_pool["family_size"] - 4).clip(lower=0)
             + 0.9 * eligible_pool["tuition_enrolled_children"].clip(lower=0)
             - 0.2 * eligible_pool["ses_centered"]
-        ).clip(lower=0.01)
+        )
     
-        probs = (w / w.sum()).to_numpy()
+        # Make weights robust to NaNs and non-positive totals
+        w = pd.to_numeric(w, errors="coerce").fillna(0.0).clip(lower=0.01)
+        wsum = float(w.sum())
     
-        # Select aid recipients
+        if not np.isfinite(wsum) or wsum <= 0:
+            probs = np.ones(len(w), dtype=float) / len(w)
+        else:
+            probs = (w / wsum).to_numpy(dtype=float)
+    
         chosen_idx = rng.choice(
             eligible_pool.index.to_numpy(),
             size=target_n_aid,
@@ -386,14 +416,41 @@ def simulate_applicants(
             p=probs
         )
     
-        # Honor the original aid OFFER exactly
+        # REALIZED aid = OFFER (exactly), only for chosen (enrolled) recipients
         df.loc[chosen_idx, "aid_offered_amount"] = df.loc[chosen_idx, "aid_offer_amount"]
+    
+        tuition_chosen = pd.to_numeric(df.loc[chosen_idx, "tuition"], errors="coerce").fillna(0.0)
+        df.loc[chosen_idx, "aid_offered_amount"] = np.minimum(
+            df.loc[chosen_idx, "aid_offered_amount"].to_numpy(dtype=float),
+            tuition_chosen.to_numpy(dtype=float)
+        )
+    
+        df.loc[chosen_idx, "aid_offered_pct_tuition"] = np.where(
+            tuition_chosen.to_numpy(dtype=float) > 0,
+            (df.loc[chosen_idx, "aid_offered_amount"].to_numpy(dtype=float) / tuition_chosen.to_numpy(dtype=float)),
+            0.0
+        )
         df.loc[chosen_idx, "aid_offered_pct_tuition"] = (
-            df.loc[chosen_idx, "aid_offered_amount"] /
-            df.loc[chosen_idx, "tuition"]
-        ).clip(0, 1)
-
-    return df
+            pd.Series(df.loc[chosen_idx, "aid_offered_pct_tuition"])
+              .fillna(0.0)
+              .clip(0, 1)
+              .to_numpy()
+        )
+    
+    # 16d) Rename variables to avoid confusion 
+    # offer_*     = what was offered pre-enrollment (drives yield)
+    # realized_*  = what is actually paid post-enrollment (use for budget/EDA)
+    df.rename(
+        columns={
+            "aid_offer_amount": "offer_amount",
+            "aid_offer_pct_tuition": "offer_pct_tuition",
+            "aid_offered_amount": "realized_aid_amount",
+            "aid_offered_pct_tuition": "realized_aid_pct_tuition",
+        },
+        inplace=True
+    )
+    
+return df
 
 def simulate_many_years(
     n_years: int,
