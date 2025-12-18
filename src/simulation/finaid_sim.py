@@ -388,7 +388,7 @@ def simulate_applicants(
     df.loc[mask, "enrolled"] = rng.binomial(1, 1 / (1 + np.exp(-logit)))
 
     # 15.5–15.7 WAITLIST ROUNDS: offer -> (aid offer if needed) -> enroll
-    MAX_WAITLIST_ROUNDS = 2
+    MAX_WAITLIST_ROUNDS = 3
     TARGET_FILL_RATE = 0.90
     NEAR_MISS_DELTA = 0.6
     ABSOLUTE_FLOOR = -1.25
@@ -504,6 +504,14 @@ def simulate_applicants(
             )
 
             df.loc[mask_new_offer, "enrolled"] = rng.binomial(1, 1 / (1 + np.exp(-logit_new)))
+    
+    # HARD CAP: if a grade over-enrolls, keep only top admit_index enrollees up to seats
+    for g, seats in seat_quota.items():
+        enrolled_g = df[(df["grade_applying_to"] == g) & (df["enrolled"] == 1)]
+        if len(enrolled_g) > seats:
+            keep_idx = enrolled_g.sort_values("admit_index", ascending=False).head(seats).index
+            drop_idx = enrolled_g.index.difference(keep_idx)
+            df.loc[drop_idx, "enrolled"] = 0
 
     # 16. FINAL aid for new admits (need-based; honor the offer)
     #     POLICY TARGET:
