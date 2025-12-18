@@ -375,7 +375,7 @@ def simulate_applicants(
     )
 
     logit = (
-        1.8
+        -0.6
         + (0.8 + aid_slope) * df.loc[mask, "aid_offer_pct_tuition"]
         + 0.9 * df.loc[mask, "legacy_status"]
         + 0.6 * df.loc[mask, "tuition_enrolled_children"]
@@ -442,9 +442,9 @@ def simulate_applicants(
         if len(fill_idx) == 0:
             continue
     
-        # Force-enroll selected waitlist candidates
-        df.loc[fill_idx, "spot_offered"] = 1
-        df.loc[fill_idx, "enrolled"] = 1
+    # Offer spots to waitlist candidates (do NOT force-enroll)
+    df.loc[fill_idx, "spot_offered"] = 1
+    # leave enrolled as-is (0) for now; they'll be handled by the enrollment model below 
     
     # 15.6 Generate aid offers for post-waitlist admits who requested aid
     #      (uses aid_offer_* names because rename happens in Step 16)
@@ -472,6 +472,40 @@ def simulate_applicants(
         df.loc[idx, "aid_offer_amount"] = offer_amt
         df.loc[idx, "aid_offer_pct_tuition"] = (offer_amt / tuition).clip(0, 1)
 
+    # 15.7 Re-run enrollment for newly offered waitlist candidates (those still enrolled==0)
+    mask_new_offer = (df["spot_offered"] == 1) & (df["enrolled"] == 0)
+    
+    if mask_new_offer.any():
+        # ensure no NaNs
+        df.loc[mask_new_offer, "aid_offer_pct_tuition"] = (
+            df.loc[mask_new_offer, "aid_offer_pct_tuition"]
+              .fillna(0.0)
+              .clip(0, 1)
+        )
+    
+        aid_slope_new = df.loc[mask_new_offer, "income_band"].map({
+            "<75k": 3.5, "75–150k": 2.8,
+            "150–250k": 1.6, ">250k": 0.8
+        }).fillna(0.0)
+    
+        z_test_new = (df.loc[mask_new_offer, "score_testing"] - df["score_testing"].mean()) / df["score_testing"].std()
+    
+        grade_effect_new = df.loc[mask_new_offer, "grade_applying_to"].apply(
+            lambda g: 0.0 if g <= 5 else 0.3 if g <= 8 else 0.6
+        )
+    
+        # IMPORTANT: use the SAME logit structure as Step 15 (but see Change 3 below for tuning)
+        logit_new = (
+            -0.6
+            + (0.8 + aid_slope_new) * df.loc[mask_new_offer, "aid_offer_pct_tuition"]
+            + 0.9 * df.loc[mask_new_offer, "legacy_status"]
+            + 0.6 * df.loc[mask_new_offer, "tuition_enrolled_children"]
+            + 0.25 * z_test_new
+            + grade_effect_new
+        )
+    
+        df.loc[mask_new_offer, "enrolled"] = rng.binomial(1, 1 / (1 + np.exp(-logit_new)))
+    
     # 16. FINAL aid for new admits (need-based; honor the offer)
     #     POLICY TARGET:
     #       - ~85% of ENROLLED aid requesters (income < $150k) receive aid
