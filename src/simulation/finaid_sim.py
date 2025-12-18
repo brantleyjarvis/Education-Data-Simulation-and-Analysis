@@ -95,7 +95,14 @@ def simulate_applicants(
     )
 
     # 9. Tuition-enrolled children
-    base_prob = df["family_size"].map({2: 0.0, 3: 0.05, 4: 0.15, 5: 0.25, 6: 0.35})
+    base_prob = df["family_size"].map({
+    2: 0.0,
+    3: 0.10,
+    4: 0.40,
+    5: 0.55,
+    6: 0.70
+    })
+
     logit = np.log(np.clip(base_prob, 1e-6, 1 - 1e-6) / (1 - base_prob))
     logit += 0.05 * (ses_pct - 0.5)
     sib_prob = 1 / (1 + np.exp(-logit))
