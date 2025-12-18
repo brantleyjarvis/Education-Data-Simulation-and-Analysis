@@ -215,7 +215,7 @@ def simulate_applicants(
     )
     
     # Admissions tuning parameters
-    TARGET_YIELD = 0.65          # expected yield among offers
+    TARGET_YIELD = 0.55          # expected yield among offers
     MAX_OFFER_MULTIPLIER = 1.8   # guardrail against absurd over-offering
     
     CUTOFF_QUANTILE = 0.55       # grade-specific quality cutoff
@@ -357,16 +357,18 @@ def simulate_applicants(
     df["aid_offered_amount"] = 0.0
     df["aid_offered_pct_tuition"] = 0.0
 
-    # 15. Enrollment decision
+    # 15. Enrollment decision (initial offers)
     df["enrolled"] = 0
     mask = df["spot_offered"] == 1
 
-    df.loc[mask, "aid_offer_pct_tuition"] = df.loc[mask, "aid_offer_pct_tuition"].fillna(0.0)
-    
+    BASE_INTERCEPT = -0.6  # keep consistent across initial + waitlist rounds
+
+    df.loc[mask, "aid_offer_pct_tuition"] = df.loc[mask, "aid_offer_pct_tuition"].fillna(0.0).clip(0, 1)
+
     aid_slope = df.loc[mask, "income_band"].map({
         "<75k": 3.5, "75–150k": 2.8,
         "150–250k": 1.6, ">250k": 0.8
-    }).fillna(0.0)  #  prevents NaN if income_band is unexpected
+    }).fillna(0.0)
 
     z_test_m = (df.loc[mask, "score_testing"] - df["score_testing"].mean()) / df["score_testing"].std()
 
@@ -375,7 +377,7 @@ def simulate_applicants(
     )
 
     logit = (
-        -0.6
+        BASE_INTERCEPT
         + (0.8 + aid_slope) * df.loc[mask, "aid_offer_pct_tuition"]
         + 0.9 * df.loc[mask, "legacy_status"]
         + 0.6 * df.loc[mask, "tuition_enrolled_children"]
@@ -384,128 +386,125 @@ def simulate_applicants(
     )
 
     df.loc[mask, "enrolled"] = rng.binomial(1, 1 / (1 + np.exp(-logit)))
-    
-    # 15.5 Waitlist fill to meet seat quotas (sweet-spot version)
-    
-    TARGET_FILL_RATE = 0.90       # minimum acceptable fill
-    NEAR_MISS_DELTA = 0.6        # how far below cutoff we allow (tunable)
-    ABSOLUTE_FLOOR = -1.25        # never admit below this admit_index
-    
-    for g, seats in seat_quota.items():
-    
-        sub = df[df["grade_applying_to"] == g].copy()
-        if len(sub) == 0:
-            continue
-    
-        # Current enrollment
-        enrolled_idx = sub[sub["enrolled"] == 1].index
-        current_fill = len(enrolled_idx) / seats
-    
-        if current_fill >= TARGET_FILL_RATE:
-            continue
-    
-        shortfall = int(np.ceil(TARGET_FILL_RATE * seats - len(enrolled_idx)))
-        if shortfall <= 0:
-            continue
-    
-        # Recompute grade-specific cutoff (same as Step 13)
-        cutoff = max(
-            sub["admit_index"].quantile(CUTOFF_QUANTILE),
-            MIN_CUTOFF
-        )
-    
-        # Tier 1: standard admissible waitlist
-        tier1 = sub[
-            (sub["enrolled"] == 0) &
-            (sub["admit_index"] >= cutoff)
-        ].sort_values("admit_index", ascending=False)
-    
-        fill_idx = []
-    
-        if len(tier1) > 0:
-            take = min(shortfall, len(tier1))
-            fill_idx.extend(tier1.head(take).index.tolist())
-            shortfall -= take
-    
-        # Tier 2: near-miss band (controlled relaxation)
-        if shortfall > 0:
-            tier2 = sub[
-                (sub["enrolled"] == 0) &
-                (sub["admit_index"] < cutoff) &
-                (sub["admit_index"] >= max(cutoff - NEAR_MISS_DELTA, ABSOLUTE_FLOOR))
-            ].sort_values("admit_index", ascending=False)
-    
-            if len(tier2) > 0:
-                take = min(shortfall, len(tier2))
-                fill_idx.extend(tier2.head(take).index.tolist())
-    
-        if len(fill_idx) == 0:
-            continue
-    
-    # Offer spots to waitlist candidates (do NOT force-enroll)
-    df.loc[fill_idx, "spot_offered"] = 1
-    # leave enrolled as-is (0) for now; they'll be handled by the enrollment model below 
-    
-    # 15.6 Generate aid offers for post-waitlist admits who requested aid
-    #      (uses aid_offer_* names because rename happens in Step 16)
-   
-    need_offer = (
-        (df["spot_offered"] == 1) &
-        (df["enrolled"] == 1) &
-        (df["aid_requested"] == 1) &
-        (df["aid_offer_amount"] == 0) &     # <-- was offer_amount
-        (df["income_band"].isin(["<75k", "75–150k"]))
-    )
-    
-    idx = df.index[need_offer]
-    
-    if len(idx) > 0:
-        A, B = 6.5, 3.0
-        aid_pct = rng.beta(A, B, size=len(idx)).clip(0.20, 1.00)
-    
-        mc = (df.loc[idx, "tuition_enrolled_children"].to_numpy() >= 2)
-        aid_pct = (aid_pct * np.where(mc, 1.08, 1.0)).clip(0.20, 1.00)
-    
-        tuition = df.loc[idx, "tuition"].to_numpy(dtype=float)
-        offer_amt = np.minimum(aid_pct * tuition, tuition)
-    
-        df.loc[idx, "aid_offer_amount"] = offer_amt
-        df.loc[idx, "aid_offer_pct_tuition"] = (offer_amt / tuition).clip(0, 1)
 
-    # 15.7 Re-run enrollment for newly offered waitlist candidates (those still enrolled==0)
-    mask_new_offer = (df["spot_offered"] == 1) & (df["enrolled"] == 0)
-    
-    if mask_new_offer.any():
-        # ensure no NaNs
-        df.loc[mask_new_offer, "aid_offer_pct_tuition"] = (
-            df.loc[mask_new_offer, "aid_offer_pct_tuition"]
-              .fillna(0.0)
-              .clip(0, 1)
+    # 15.5–15.7 WAITLIST ROUNDS: offer -> (aid offer if needed) -> enroll
+    MAX_WAITLIST_ROUNDS = 2
+    TARGET_FILL_RATE = 0.90
+    NEAR_MISS_DELTA = 0.6
+    ABSOLUTE_FLOOR = -1.25
+
+    for round_i in range(MAX_WAITLIST_ROUNDS):
+
+        any_shortfall = False
+
+        # --- offer additional students by grade ---
+        for g, seats in seat_quota.items():
+
+            sub = df[df["grade_applying_to"] == g].copy()
+            if len(sub) == 0:
+                continue
+
+            enrolled_idx = sub[sub["enrolled"] == 1].index
+            current_fill = len(enrolled_idx) / seats
+
+            if current_fill >= TARGET_FILL_RATE:
+                continue
+
+            any_shortfall = True
+
+            shortfall = int(np.ceil(TARGET_FILL_RATE * seats - len(enrolled_idx)))
+            if shortfall <= 0:
+                continue
+
+            cutoff = max(
+                sub["admit_index"].quantile(CUTOFF_QUANTILE),
+                MIN_CUTOFF
+            )
+
+            tier1 = sub[
+                (sub["spot_offered"] == 0) &
+                (sub["admit_index"] >= cutoff)
+            ].sort_values("admit_index", ascending=False)
+
+            fill_idx = []
+
+            if len(tier1) > 0:
+                take = min(shortfall, len(tier1))
+                fill_idx.extend(tier1.head(take).index.tolist())
+                shortfall -= take
+
+            if shortfall > 0:
+                tier2 = sub[
+                    (sub["spot_offered"] == 0) &
+                    (sub["admit_index"] < cutoff) &
+                    (sub["admit_index"] >= max(cutoff - NEAR_MISS_DELTA, ABSOLUTE_FLOOR))
+                ].sort_values("admit_index", ascending=False)
+
+                if len(tier2) > 0:
+                    take = min(shortfall, len(tier2))
+                    fill_idx.extend(tier2.head(take).index.tolist())
+
+            if len(fill_idx) == 0:
+                continue
+
+            df.loc[fill_idx, "spot_offered"] = 1
+
+        if not any_shortfall:
+            break
+
+        # --- generate aid offers for newly offered (still not enrolled) ---
+        need_offer = (
+            (df["spot_offered"] == 1) &
+            (df["enrolled"] == 0) &
+            (df["aid_requested"] == 1) &
+            (df["aid_offer_amount"] == 0) &
+            (df["income_band"].isin(["<75k", "75–150k"]))
         )
-    
-        aid_slope_new = df.loc[mask_new_offer, "income_band"].map({
-            "<75k": 3.5, "75–150k": 2.8,
-            "150–250k": 1.6, ">250k": 0.8
-        }).fillna(0.0)
-    
-        z_test_new = (df.loc[mask_new_offer, "score_testing"] - df["score_testing"].mean()) / df["score_testing"].std()
-    
-        grade_effect_new = df.loc[mask_new_offer, "grade_applying_to"].apply(
-            lambda g: 0.0 if g <= 5 else 0.3 if g <= 8 else 0.6
-        )
-    
-        # IMPORTANT: use the SAME logit structure as Step 15 (but see Change 3 below for tuning)
-        logit_new = (
-            -0.6
-            + (0.8 + aid_slope_new) * df.loc[mask_new_offer, "aid_offer_pct_tuition"]
-            + 0.9 * df.loc[mask_new_offer, "legacy_status"]
-            + 0.6 * df.loc[mask_new_offer, "tuition_enrolled_children"]
-            + 0.25 * z_test_new
-            + grade_effect_new
-        )
-    
-        df.loc[mask_new_offer, "enrolled"] = rng.binomial(1, 1 / (1 + np.exp(-logit_new)))
-    
+
+        idx = df.index[need_offer]
+        if len(idx) > 0:
+            A, B = 6.5, 3.0
+            aid_pct = rng.beta(A, B, size=len(idx)).clip(0.20, 1.00)
+
+            mc = (df.loc[idx, "tuition_enrolled_children"].to_numpy() >= 2)
+            aid_pct = (aid_pct * np.where(mc, 1.08, 1.0)).clip(0.20, 1.00)
+
+            tuition = df.loc[idx, "tuition"].to_numpy(dtype=float)
+            offer_amt = np.minimum(aid_pct * tuition, tuition)
+
+            df.loc[idx, "aid_offer_amount"] = offer_amt
+            df.loc[idx, "aid_offer_pct_tuition"] = (offer_amt / tuition).clip(0, 1)
+
+        # --- enroll newly offered (still enrolled==0) ---
+        mask_new_offer = (df["spot_offered"] == 1) & (df["enrolled"] == 0)
+
+        if mask_new_offer.any():
+            df.loc[mask_new_offer, "aid_offer_pct_tuition"] = (
+                df.loc[mask_new_offer, "aid_offer_pct_tuition"].fillna(0.0).clip(0, 1)
+            )
+
+            aid_slope_new = df.loc[mask_new_offer, "income_band"].map({
+                "<75k": 3.5, "75–150k": 2.8,
+                "150–250k": 1.6, ">250k": 0.8
+            }).fillna(0.0)
+
+            z_test_new = (df.loc[mask_new_offer, "score_testing"] - df["score_testing"].mean()) / df["score_testing"].std()
+
+            grade_effect_new = df.loc[mask_new_offer, "grade_applying_to"].apply(
+                lambda g: 0.0 if g <= 5 else 0.3 if g <= 8 else 0.6
+            )
+
+            logit_new = (
+                BASE_INTERCEPT
+                + (0.8 + aid_slope_new) * df.loc[mask_new_offer, "aid_offer_pct_tuition"]
+                + 0.9 * df.loc[mask_new_offer, "legacy_status"]
+                + 0.6 * df.loc[mask_new_offer, "tuition_enrolled_children"]
+                + 0.25 * z_test_new
+                + grade_effect_new
+            )
+
+            df.loc[mask_new_offer, "enrolled"] = rng.binomial(1, 1 / (1 + np.exp(-logit_new)))
+
     # 16. FINAL aid for new admits (need-based; honor the offer)
     #     POLICY TARGET:
     #       - ~85% of ENROLLED aid requesters (income < $150k) receive aid
