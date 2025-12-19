@@ -1,16 +1,56 @@
+"""
+TARGETS-DRIVEN SIMULATION (DROP-IN BLOCK)
+
+What this does (in plain English):
+- Uses Brian's targets table (grade x year) to drive HOW MANY applicants are created per grade-year.
+- Generates applicant characteristics + scores (Steps 1–12).
+- Then enforces offers + enrollment totals from the targets table (instead of your internal seat/yield logic).
+- Keeps the microdata realistic by choosing who gets offered via admit_index and who enrolls via an enrollment-probability model.
+- DOES NOT run your old admissions/waitlist/aid pipeline inside simulate_applicants (that would conflict with targets).
+- Leaves aid for a later step (once offers/enrollments match targets). You can add it back after this runs cleanly.
+
+Expected targets columns:
+- year (int)
+- grade (int 1–12)
+- apps (int)  [required]
+AND EITHER:
+- offers (int) and enrolled (int)
+OR:
+- offers (int) and yield (float 0–1)
+OR:
+- seats (int) and yield (float 0–1)
+
+If your table uses different names, adjust the small COLUMN MAP section below.
+"""
+
 from __future__ import annotations
 
+from pathlib import Path
 import numpy as np
 import pandas as pd
 
+# -----------------------------
+# GLOBAL CONSTANTS
+# -----------------------------
+TUITION_BY_GRADE = {
+    1: 23700, 2: 23700, 3: 23700,
+    4: 25000, 5: 25000, 6: 25000,
+    7: 28100, 8: 28100, 9: 28100,
+    10: 29400, 11: 29400, 12: 29400
+}
 
+# -----------------------------
+# 1) Applicant generator (Steps 1–12 only)
+# -----------------------------
 def simulate_applicants(
     n_applicants: int,
     zip_df: pd.DataFrame,
-    rng: np.random.Generator | None = None
+    rng: np.random.Generator | None = None,
+    forced_grade: int | None = None,
 ) -> pd.DataFrame:
     """
-    Simulate n_applicants using the private school generative model.
+    Generate applicant microdata up through scores.
+    Admissions/offers/enrollment will be enforced from targets elsewhere.
     """
     if rng is None:
         rng = np.random.default_rng()
@@ -21,21 +61,18 @@ def simulate_applicants(
     df["applicant_id"] = np.arange(1, n_applicants + 1)
 
     # 2. Grade applying to
-    grades = np.arange(1, 13)
-    grade_probs = np.array([
-        0.25, 0.08, 0.09, 0.07, 0.07, 0.15,
-        0.06, 0.05, 0.10, 0.04, 0.02, 0.02
-    ])
-    df["grade_applying_to"] = rng.choice(grades, size=n_applicants, p=grade_probs)
+    if forced_grade is not None:
+        df["grade_applying_to"] = forced_grade
+    else:
+        grades = np.arange(1, 13)
+        grade_probs = np.array([
+            0.25, 0.08, 0.09, 0.07, 0.07, 0.15,
+            0.06, 0.05, 0.10, 0.04, 0.02, 0.02
+        ])
+        df["grade_applying_to"] = rng.choice(grades, size=n_applicants, p=grade_probs)
 
     # 3. Tuition by grade
-    tuition_by_grade = {
-        1: 23700, 2: 23700, 3: 23700,
-        4: 25000, 5: 25000, 6: 25000,
-        7: 28100, 8: 28100, 9: 28100,
-        10: 29400, 11: 29400, 12: 29400
-    }
-    df["tuition"] = df["grade_applying_to"].map(tuition_by_grade)
+    df["tuition"] = df["grade_applying_to"].map(TUITION_BY_GRADE)
 
     # 4. ZIP assignment + SES
     zip_idx = rng.choice(
@@ -72,7 +109,7 @@ def simulate_applicants(
     # 6. Gender
     df["gender_male"] = rng.binomial(1, 0.5, size=n_applicants)
 
-    # 7. Income band
+    # 7. Income band (driven by SES percentile)
     ses_pct = df["ses_index"].rank(pct=True)
 
     def assign_income_band(p: float) -> str:
@@ -94,15 +131,8 @@ def simulate_applicants(
         p=[0.05, 0.25, 0.45, 0.20, 0.05]
     )
 
-    # 9. Tuition-enrolled children
-    base_prob = df["family_size"].map({
-    2: 0.0,
-    3: 0.10,
-    4: 0.40,
-    5: 0.55,
-    6: 0.70
-    })
-
+    # 9. Tuition-enrolled children (binary)
+    base_prob = df["family_size"].map({2: 0.0, 3: 0.10, 4: 0.40, 5: 0.55, 6: 0.70})
     logit = np.log(np.clip(base_prob, 1e-6, 1 - 1e-6) / (1 - base_prob))
     logit += 0.05 * (ses_pct - 0.5)
     sib_prob = 1 / (1 + np.exp(-logit))
@@ -139,7 +169,6 @@ def simulate_applicants(
         "150–250k": 0.01,
         ">250k": 0.0001
     })
-
     logit = np.log(base_p / (1 - base_p))
     logit += 0.05 * (df["family_size"] - 3)
     logit += 0.05 * df["tuition_enrolled_children"]
@@ -148,7 +177,6 @@ def simulate_applicants(
 
     # 12. Scores
     n = len(df)
-
     corr = np.array([
         [1.0, 0.5, 0.4, 0.5, 0.5],
         [0.5, 1.0, 0.3, 0.4, 0.4],
@@ -156,15 +184,14 @@ def simulate_applicants(
         [0.5, 0.4, 0.3, 1.0, 0.5],
         [0.5, 0.4, 0.3, 0.5, 1.0],
     ])
-
     latent = rng.normal(size=(n, 5)) @ np.linalg.cholesky(corr).T
     z_test, z_art, z_ath, z_lead, z_int = latent.T
 
     z_test += 0.20 * df["ses_centered"] - 0.20 * df["race_ethnic_minority"]
-    z_art += 0.10 * df["ses_centered"] - 0.05 * df["race_ethnic_minority"]
-    z_ath += 0.10 * df["ses_centered"] - 0.05 * df["race_ethnic_minority"]
+    z_art  += 0.10 * df["ses_centered"] - 0.05 * df["race_ethnic_minority"]
+    z_ath  += 0.10 * df["ses_centered"] - 0.05 * df["race_ethnic_minority"]
     z_lead += 0.10 * df["ses_centered"] - 0.05 * df["race_ethnic_minority"]
-    z_int += 0.10 * df["ses_centered"] - 0.05 * df["race_ethnic_minority"]
+    z_int  += 0.10 * df["ses_centered"] - 0.05 * df["race_ethnic_minority"]
 
     pct = pd.Series(z_test).rank(pct=True)
     df["score_testing"] = (pct ** 0.4 * 100).clip(0, 99)
@@ -177,10 +204,211 @@ def simulate_applicants(
             default=5
         )
 
-    df["score_art"] = likert(z_art + rng.normal(0, 0.35, n), (0.12, 0.32, 0.58, 0.82))
-    df["score_athletics"] = likert(z_ath + rng.normal(0, 0.35, n), (0.08, 0.28, 0.55, 0.80))
+    df["score_art"]        = likert(z_art  + rng.normal(0, 0.35, n), (0.12, 0.32, 0.58, 0.82))
+    df["score_athletics"]  = likert(z_ath  + rng.normal(0, 0.35, n), (0.08, 0.28, 0.55, 0.80))
     df["score_leadership"] = likert(z_lead + rng.normal(0, 0.35, n), (0.10, 0.30, 0.55, 0.78))
-    df["score_interview"] = likert(z_int + rng.normal(0, 0.35, n), (0.06, 0.25, 0.50, 0.75))
+    df["score_interview"]  = likert(z_int  + rng.normal(0, 0.35, n), (0.06, 0.25, 0.50, 0.75))
+
+    return df
+
+
+# -----------------------------
+# 2) Enforce offers + enrollment from targets
+# -----------------------------
+def apply_offers_and_enrollment_from_targets(
+    df_year: pd.DataFrame,
+    targets: pd.DataFrame,
+    year: int,
+    rng: np.random.Generator,
+) -> pd.DataFrame:
+    """
+    Enforce grade-by-year offers/enrollment totals from targets.
+    Who gets offered: top admit_index.
+    Who enrolls: sampled among offered weighted by enrollment propensity.
+    """
+
+    # ---- COLUMN MAP (edit ONLY if your targets use different names) ----
+    COL_YEAR = "year"
+    COL_GRADE = "grade"
+    COL_APPS = "apps"              # required (already used earlier)
+    COL_OFFERS = "offers"          # preferred if present
+    COL_ENROLLED = "enrolled"      # preferred if present
+    COL_YIELD = "yield"            # optional fallback (0–1)
+    COL_SEATS = "seats"            # optional fallback if offers not present
+
+    t_year = targets[targets[COL_YEAR] == year].copy()
+
+    if COL_OFFERS not in targets.columns and not (COL_SEATS in targets.columns and COL_YIELD in targets.columns):
+        raise ValueError("Targets must have 'offers' OR (seats AND yield).")
+    if COL_ENROLLED not in targets.columns and COL_YIELD not in targets.columns:
+        raise ValueError("Targets must have 'enrolled' OR 'yield'.")
+
+    df = df_year.copy()
+    df["spot_offered"] = 0
+    df["enrolled"] = 0
+
+    # Admit index (same spirit as your original)
+    z_test = (df["score_testing"] - df["score_testing"].mean()) / df["score_testing"].std()
+    z_int  = (df["score_interview"] - df["score_interview"].mean()) / df["score_interview"].std()
+    z_lead = (df["score_leadership"] - df["score_leadership"].mean()) / df["score_leadership"].std()
+
+    income_bonus = df["income_band"].map({
+        "<75k": 0.6,
+        "75–150k": 0.3,
+        "150–250k": 0.1,
+        ">250k": 0.0
+    }).fillna(0.0)
+
+    df["admit_index"] = (
+        0.6 * z_test +
+        0.3 * z_int +
+        0.3 * z_lead +
+        0.6 * df["legacy_status"] +
+        income_bonus
+    )
+
+    # Enrollment propensity (used only for choosing who enrolls, not to set totals)
+    BASE_INTERCEPT = -0.6
+    aid_slope = df["income_band"].map({
+        "<75k": 3.5, "75–150k": 2.8,
+        "150–250k": 1.6, ">250k": 0.8
+    }).fillna(0.0)
+
+    grade_effect = df["grade_applying_to"].apply(lambda g: 0.0 if g <= 5 else 0.3 if g <= 8 else 0.6)
+    z_test_m = (df["score_testing"] - df["score_testing"].mean()) / df["score_testing"].std()
+
+    # Offer pct is 0 here (aid comes later); still gives reasonable ranking by non-aid factors
+    offer_pct = pd.Series(0.0, index=df.index)
+
+    logit = (
+        BASE_INTERCEPT
+        + (0.8 + aid_slope) * offer_pct
+        + 0.9 * df["legacy_status"]
+        + 0.6 * df["tuition_enrolled_children"]
+        + 0.25 * z_test_m
+        + grade_effect
+    )
+    df["_enroll_prob"] = 1 / (1 + np.exp(-logit))
+
+    # Apply grade-specific targets
+    for g in range(1, 13):
+        sub_idx = df.index[df["grade_applying_to"] == g]
+        if len(sub_idx) == 0:
+            continue
+
+        row = t_year[t_year[COL_GRADE] == g]
+        if row.empty:
+            continue
+        row = row.iloc[0]
+
+        # Offers target
+        if COL_OFFERS in targets.columns and pd.notna(row.get(COL_OFFERS, np.nan)):
+            n_offers = int(row[COL_OFFERS])
+        else:
+            seats = int(row[COL_SEATS])
+            y = float(row[COL_YIELD])
+            y = max(min(y, 0.999), 0.01)
+            n_offers = int(np.ceil(seats / y))
+
+        n_offers = max(0, min(n_offers, len(sub_idx)))
+
+        offered_idx = (
+            df.loc[sub_idx]
+            .sort_values("admit_index", ascending=False)
+            .head(n_offers)
+            .index
+        )
+        df.loc[offered_idx, "spot_offered"] = 1
+
+        # Enrolled target
+        if COL_ENROLLED in targets.columns and pd.notna(row.get(COL_ENROLLED, np.nan)):
+            n_enrolled = int(row[COL_ENROLLED])
+        else:
+            y = float(row[COL_YIELD])
+            y = max(min(y, 1.0), 0.0)
+            n_enrolled = int(round(y * n_offers))
+
+        n_enrolled = max(0, min(n_enrolled, len(offered_idx)))
+
+        if n_enrolled > 0:
+            probs = df.loc[offered_idx, "_enroll_prob"].to_numpy(dtype=float)
+            probs = np.clip(probs, 1e-9, None)
+            probs = probs / probs.sum()
+            chosen = rng.choice(offered_idx.to_numpy(), size=n_enrolled, replace=False, p=probs)
+            df.loc[chosen, "enrolled"] = 1
+
+    df.drop(columns=["_enroll_prob"], inplace=True)
+    return df
+
+
+# -----------------------------
+# 3) Multi-year runner from targets
+# -----------------------------
+def simulate_many_years_from_targets(
+    targets: pd.DataFrame,
+    zip_df: pd.DataFrame,
+    base_seed: int = 42
+) -> pd.DataFrame:
+    all_years = []
+
+    # basic schema checks (fail fast)
+    required = {"year", "grade", "apps"}
+    missing = required.difference(set(targets.columns))
+    if missing:
+        raise ValueError(f"Targets missing required columns: {missing}")
+
+    for year in sorted(targets["year"].unique()):
+        rng_year = np.random.default_rng(base_seed + int(year))
+
+        df_year_parts = []
+        for g in range(1, 13):
+            row = targets[(targets["year"] == year) & (targets["grade"] == g)]
+            if row.empty:
+                continue
+
+            n_apps = int(row["apps"].iloc[0])
+            if n_apps <= 0:
+                continue
+
+            df_g = simulate_applicants(
+                n_apps,
+                zip_df,
+                rng_year,
+                forced_grade=g
+            )
+            df_g["year"] = int(year)
+            df_year_parts.append(df_g)
+
+        if not df_year_parts:
+            continue
+
+        df_year = pd.concat(df_year_parts, ignore_index=True)
+
+        # enforce offers+enrollment totals for this year
+        df_year = apply_offers_and_enrollment_from_targets(df_year, targets, int(year), rng_year)
+
+        all_years.append(df_year)
+
+    if not all_years:
+        return pd.DataFrame()
+
+    return pd.concat(all_years, ignore_index=True)
+
+
+# -----------------------------
+# 4) (Optional) Quick check helper
+# -----------------------------
+def check_against_targets(sim: pd.DataFrame, targets: pd.DataFrame) -> pd.DataFrame:
+    chk = (
+        sim.groupby(["year", "grade_applying_to"])
+           .agg(apps=("applicant_id", "size"),
+                offers=("spot_offered", "sum"),
+                enrolled=("enrolled", "sum"))
+           .reset_index()
+           .rename(columns={"grade_applying_to": "grade"})
+    )
+    return chk.merge(targets, on=["year", "grade"], how="left")
+
 
     # 13. Spot offered (capacity-driven admissions)
     
@@ -624,16 +852,36 @@ def simulate_applicants(
     
     return df
 
-def simulate_many_years(
-    n_years: int,
-    applicants_per_year: int,
+def simulate_many_years_from_targets(
+    targets: pd.DataFrame,
     zip_df: pd.DataFrame,
     base_seed: int = 42
 ) -> pd.DataFrame:
     all_years = []
-    for year in range(1, n_years + 1):
-        rng_year = np.random.default_rng(base_seed + year)
-        df_year = simulate_applicants(applicants_per_year, zip_df, rng_year)
-        df_year["year"] = year
+
+    for year in sorted(targets["year"].unique()):
+        rng_year = np.random.default_rng(base_seed + int(year))
+
+        # Simulate applicants grade-by-grade using observed Apps
+        df_year_parts = []
+        for g in range(1, 13):
+            row = targets[(targets["year"] == year) & (targets["grade"] == g)]
+            if row.empty:
+                continue
+
+            n_apps = int(row["apps"].iloc[0])
+            df_g = simulate_applicants(n_apps, zip_df, rng_year)
+            df_g["year"] = year
+            df_g["grade_applying_to"] = g  # override grade draw
+            df_g["tuition"] = df_g["grade_applying_to"].map(tuition_by_grade)  # keep consistent
+            df_year_parts.append(df_g)
+
+        df_year = pd.concat(df_year_parts, ignore_index=True)
+
+        # Apply observed offers/enrollment calibration
+        df_year = apply_offers_and_enrollment_from_targets(df_year, targets, rng_year)
+
         all_years.append(df_year)
+
     return pd.concat(all_years, ignore_index=True)
+
