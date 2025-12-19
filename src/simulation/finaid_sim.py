@@ -242,3 +242,34 @@ def simulate_many_years_from_targets(
 
     return pd.concat(all_years, ignore_index=True)
 
+def simulate_many_years(
+    n_years: int,
+    zip_df: pd.DataFrame,
+    rng: np.random.Generator | None = None,
+    base_seed: int = 42,
+    targets: pd.DataFrame | None = None,
+    targets_path: str = "data/private/grade_year_targets_bootstrap.csv",
+) -> pd.DataFrame:
+    """
+    Backwards-compatible entry point expected by run_simulation.py.
+
+    Old behavior: simulate N years without targets.
+    New behavior (default): simulate using Brian targets (bootstrapped/extended table).
+
+    - If `targets` is None, loads from `targets_path`.
+    - Ignores `n_years` if targets already contain the year range; otherwise truncates/extends.
+    """
+    if rng is None:
+        rng = np.random.default_rng(base_seed)
+
+    if targets is None:
+        targets = pd.read_csv(targets_path)
+
+    # If caller requested n_years, subset to that many unique years (stable order)
+    years = sorted(targets["year"].unique())
+    if n_years is not None and len(years) > n_years:
+        keep_years = years[:n_years]
+        targets = targets[targets["year"].isin(keep_years)].copy()
+
+    return simulate_many_years_from_targets(targets=targets, zip_df=zip_df, base_seed=base_seed)
+
