@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from src.ingestion.build_zip_df import build_zip_df
-from src.simulation.finaid_sim import simulate_many_years
+from src.simulation.finaid_sim import simulate_many_years_from_targets as simulate_many_years
 
 
 def main() -> None:
