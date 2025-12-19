@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 from pathlib import Path
+import pandas as pd
 
 from src.ingestion.build_zip_df import build_zip_df
-from src.simulation.finaid_sim import simulate_many_years_from_targets as simulate_many_years
+from src.simulation.finaid_sim import simulate_many_years_from_targets
 
 
 def main() -> None:
@@ -29,12 +30,25 @@ def main() -> None:
         seed=42,
     )
 
-    sim_df = simulate_many_years(
-        n_years=10,
-        applicants_per_year=250,
+    # -----------------------------
+    # TARGETS-DRIVEN SIMULATION
+    # -----------------------------
+    # Use the bootstrapped/extended targets you created.
+    targets_path = Path("data/private/grade_year_targets_bootstrap.csv")  # change if needed
+    targets = pd.read_csv(targets_path)
+
+    # Respect n_years by subsetting to first N unique years in targets
+    n_years = 10
+    years = sorted(targets["year"].unique())
+    keep_years = years[:n_years]
+    targets = targets[targets["year"].isin(keep_years)].copy()
+
+    sim_df = simulate_many_years_from_targets(
+        targets=targets,
         zip_df=zip_df,
         base_seed=42,
     )
+
     sim_df["data_type"] = "simulated"
 
     out_dir = Path("data/processed/sim")
@@ -43,6 +57,8 @@ def main() -> None:
     sim_df.to_csv(out_path, index=False)
 
     print(f"Saved simulation to: {out_path}")
+    print(f"Used targets: {targets_path}")
+    print(f"Years simulated: {sorted(sim_df['year'].unique())}")
 
 
 if __name__ == "__main__":
