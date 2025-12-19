@@ -229,16 +229,14 @@ def simulate_many_years_from_targets(
                 continue
 
             n_apps = int(row["apps"].iloc[0])
-            df_g = simulate_applicants(n_apps, zip_df, rng_year)
+            df_g = simulate_applicants(n_apps, zip_df, rng_year, forced_grade=g)
             df_g["year"] = year
-            df_g["grade_applying_to"] = g  # override grade draw
-            df_g["tuition"] = df_g["grade_applying_to"].map(tuition_by_grade)  # keep consistent
             df_year_parts.append(df_g)
 
         df_year = pd.concat(df_year_parts, ignore_index=True)
 
         # Apply observed offers/enrollment calibration
-        df_year = apply_offers_and_enrollment_from_targets(df_year, targets, rng_year)
+        df_year = apply_offers_and_enrollment_from_targets(df_year, targets, int(year), rng_year)
 
         all_years.append(df_year)
 
