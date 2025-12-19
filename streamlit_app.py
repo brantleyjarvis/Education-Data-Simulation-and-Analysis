@@ -14,8 +14,8 @@ st.set_page_config(page_title="Aid Offer Explorer + Budget Optimizer", layout="w
 
 @st.cache_data
 def load_data():
-    offers = pd.read_parquet("data/private/offers.parquet")
-    marg_sorted = pd.read_parquet("data/private/marg_sorted.parquet")
+    offers = pd.read_csv("data/private/offers.csv")
+    marg_sorted = pd.read_csv("data/private/marg_sorted.csv")
     return offers, marg_sorted
 
 @st.cache_resource
